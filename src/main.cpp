@@ -6,10 +6,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef SWITCH_TX_PIN
+#define SWITCH_TX_PIN 27
+#endif
+
+#ifndef SWITCH_RX_PIN
+#define SWITCH_RX_PIN 34
+#endif
+
 namespace {
 
-constexpr uint8_t kTxPin = 27;
-constexpr uint8_t kRxPin = 34;
+constexpr uint8_t kTxPin = static_cast<uint8_t>(SWITCH_TX_PIN);
+constexpr uint8_t kRxPin = static_cast<uint8_t>(SWITCH_RX_PIN);
 constexpr unsigned long kSerialBaudRate = 115200;
 constexpr unsigned int kFrameBitLength = 32;
 constexpr size_t kMaxLineLength = 96;
@@ -209,6 +217,21 @@ bool startsWithIgnoreCase(const char *text, const char *prefix) {
     }
     ++text;
     ++prefix;
+  }
+
+  return true;
+}
+
+bool isDigitsOnly(const char *text) {
+  if (text == nullptr || *text == '\0') {
+    return false;
+  }
+
+  while (*text != '\0') {
+    if (!isdigit(static_cast<unsigned char>(*text))) {
+      return false;
+    }
+    ++text;
   }
 
   return true;
@@ -993,7 +1016,17 @@ CommandId resolveCommand(const char *token, const char **ambiguousCommands, size
     }
     bool specMatched = false;
     for (size_t index = 0; index < spec.keywordCount; ++index) {
-      if (equalsIgnoreCase(token, spec.keywords[index]) || startsWithIgnoreCase(token, spec.keywords[index]) || startsWithIgnoreCase(spec.keywords[index], token)) {
+      const char *keyword = spec.keywords[index];
+      const bool exactMatch = equalsIgnoreCase(token, keyword);
+      const bool prefixMatch = startsWithIgnoreCase(keyword, token);
+
+      bool compactNumericMatch = false;
+      if ((spec.id == CommandId::Speed || spec.id == CommandId::Timer) && startsWithIgnoreCase(token, keyword)) {
+        const char *suffix = token + strlen(keyword);
+        compactNumericMatch = isDigitsOnly(suffix);
+      }
+
+      if (exactMatch || prefixMatch || compactNumericMatch) {
         if (match != CommandId::Unknown) {
           if (ambiguousCommands != nullptr && ambiguousCount != nullptr) {
             addAmbiguousCommand(spec.keywords[0], ambiguousCommands, ambiguousCapacity, ambiguousCount);
