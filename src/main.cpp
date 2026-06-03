@@ -12,16 +12,15 @@ constexpr uint8_t kTxPin = 27;
 constexpr uint8_t kRxPin = 34;
 constexpr unsigned long kSerialBaudRate = 115200;
 constexpr unsigned int kFrameBitLength = 32;
-constexpr unsigned long kPairDurationMs = 4000;
-constexpr unsigned long kPairRepeatDelayMs = 110;
 constexpr size_t kMaxLineLength = 96;
-constexpr unsigned long kReceiverPairWindowMs = 10000;
-constexpr unsigned long kReceiverPairHoldMs = 2000;
-constexpr unsigned long kReceiverPairGapMs = 500;
-constexpr size_t kMaxPairedRemotes = 24;
+constexpr size_t kMaxControllerCount = 24;
+constexpr unsigned long kDefaultPairTimeoutMs = 10000;
+constexpr unsigned long kPairHoldMs = 2000;
+constexpr unsigned long kPairRepeatMs = 110;
+constexpr unsigned long kDefaultPairBurstMs = 4000;
 constexpr const char *kPrefsNamespace = "sw433";
-constexpr const char *kPrefsPairCountKey = "pairCount";
-constexpr const char *kPrefsPairDataKey = "pairData";
+constexpr const char *kPrefsCountKey = "count";
+constexpr const char *kPrefsDataKey = "data";
 
 constexpr uint8_t kWallBeep = 0x0;
 constexpr uint8_t kWallReverseA = 0x1;
@@ -29,7 +28,7 @@ constexpr uint8_t kWallReverseB = 0x2;
 constexpr uint8_t kWallSpeed2 = 0x3;
 constexpr uint8_t kWallSpeed1 = 0x4;
 constexpr uint8_t kWallSpeed6 = 0x5;
-constexpr uint8_t kWallLightOnOff = 0x6;
+constexpr uint8_t kWallLight = 0x6;
 constexpr uint8_t kWallSpeed3 = 0x7;
 constexpr uint8_t kWallSpeed5 = 0x8;
 constexpr uint8_t kWallSpeed4 = 0x9;
@@ -38,15 +37,15 @@ constexpr uint8_t kWallTimer1h = 0xB;
 constexpr uint8_t kWallTimer2h = 0xC;
 constexpr uint8_t kWallTimer4h = 0xD;
 constexpr uint8_t kWallTimer8h = 0xE;
-constexpr uint8_t kWallFanOnOff = 0xF;
+constexpr uint8_t kWallFan = 0xF;
 
 constexpr uint8_t kManualSpeed1 = 0x02;
 constexpr uint8_t kManualSpeed4 = 0x03;
 constexpr uint8_t kManualBeep = 0x04;
-constexpr uint8_t kManualFanOnOff = 0x05;
+constexpr uint8_t kManualFan = 0x05;
 constexpr uint8_t kManualSpeed3 = 0x06;
 constexpr uint8_t kManualSpeed2 = 0x08;
-constexpr uint8_t kManualLightOnOff = 0x09;
+constexpr uint8_t kManualLight = 0x09;
 constexpr uint8_t kManualTemp = 0x0E;
 constexpr uint8_t kManualTimer4h = 0x11;
 constexpr uint8_t kManualSpeed5 = 0x14;
@@ -54,86 +53,131 @@ constexpr uint8_t kManualTimer2h = 0x17;
 constexpr uint8_t kManualReverse = 0x18;
 constexpr uint8_t kManualSpeed6 = 0x1A;
 constexpr uint8_t kManualTimer1h = 0x1B;
+constexpr uint8_t kQiachipPair = 0x0F;
+constexpr uint8_t kQiachipLight = 0x08;
+constexpr uint8_t kQiachipSpeed3 = 0x09;
+constexpr uint8_t kQiachipSpeed2 = 0x03;
+constexpr uint8_t kQiachipSpeed1 = 0x02;
+constexpr uint8_t kQiachipStop = 0x06;
+constexpr uint8_t kQiachipTimer1 = 0x01;
+constexpr uint8_t kQiachipTimer2 = 0x07;
+constexpr uint8_t kQiachipTimer4 = 0x05;
+constexpr uint8_t kQiachipTimer8 = 0x0A;
 
 constexpr uint8_t kWallTimerCycle[] = {kWallTimer1h, kWallTimer2h, kWallTimer4h, kWallTimer8h, kWallTimerOff};
 constexpr uint8_t kManualTimerCycle[] = {kManualTimer1h, kManualTimer2h, kManualTimer4h};
 
-enum class ProtocolMode : uint8_t {
+enum class ControllerProfile : uint8_t {
   Wall = 0,
-  Manual = 1,
-  Receiver = 2,
+  Remote = 1,
+  Qiachip = 2,
 };
 
-struct WallState {
+enum class AppMode : uint8_t {
+  Receiver = 0,
+  Controller = 1,
+};
+
+enum class CommandId : uint8_t {
+  Unknown = 0,
+  Ambiguous,
+  Help,
+  Status,
+  Remove,
+  List,
+  Clear,
+  Use,
+  Exit,
+  Light,
+  Temp,
+  Speed,
+  Fan,
+  Stop,
+  Timer,
+  Reverse,
+  Beep,
+  Pair,
+};
+
+struct WallData {
   uint8_t counter = 0;
   uint8_t timerIndex = 0;
-  bool reverseUsesB = false;
+  uint8_t reverseUsesB = 0;
 };
 
-struct ManualState {
-  uint8_t pageCounter[2] = {0, 0};
+struct ManualData {
+  uint8_t counter = 0;
+  uint8_t reserved = 0;
   uint8_t timerIndex = 0;
+};
+
+struct ControllerData {
+  WallData wall;
+  ManualData manual;
+};
+
+struct ControllerEntry {
+  uint32_t id = 0;
+  ControllerProfile profile = ControllerProfile::Remote;
+  ControllerData data;
+};
+
+struct StoredControllerEntry {
+  uint32_t id;
+  uint8_t profile;
+  ControllerData data;
 };
 
 struct DecodedFrame {
-  uint32_t raw = 0;            // Raw 32-bit RF frame.
-  uint32_t id = 0;             // Remote ID (20 bits, frame[31:12]).
-  uint8_t command = 0;         // Command nibble (frame[11:8]).
-  uint8_t x = 0;               // X nibble (frame[7:4]): counter/page+counter.
-  uint8_t y = 0;               // Checksum nibble received (frame[3:0]).
-  uint8_t key = 0;             // Derived key from ID (XOR based).
-  uint8_t page = 0;            // Manual page bit (x >> 3).
-  uint8_t manualFunction = 0;  // Manual function code: (page << 4) | command.
-  bool checksumOk = false;     // True when x ^ command ^ key == y.
-};
-
-struct PairedRemote {
+  uint32_t raw = 0;
   uint32_t id = 0;
-  ProtocolMode profile = ProtocolMode::Manual;
+  uint8_t command = 0;
+  uint8_t x = 0;
+  uint8_t y = 0;
+  uint8_t key = 0;
+  uint8_t page = 0;
+  uint8_t manualFunction = 0;
+  bool checksumOk = false;
 };
 
-struct StoredPairedRemote {
-  uint32_t id = 0;
-  uint8_t profile = 0;
-};
-
-struct ReceiverPairingState {
+struct PairingState {
   bool active = false;
   unsigned long startedAt = 0;
+  unsigned long timeoutMs = 0;
   uint32_t candidateId = 0;
-  ProtocolMode candidateProfile = ProtocolMode::Manual;
+  ControllerProfile candidateProfile = ControllerProfile::Remote;
   unsigned long candidateSince = 0;
   unsigned long candidateLastSeen = 0;
+};
+
+struct ClearConfirmState {
+  bool active = false;
+};
+
+struct CommandSpec {
+  CommandId id;
+  const char *keywords[3];
+  size_t keywordCount;
+  bool receiverAllowed;
+  bool controllerAllowed;
 };
 
 RCSwitch radio;
 Preferences preferences;
 bool preferencesReady = false;
-ProtocolMode currentMode = ProtocolMode::Manual;
-uint32_t remoteIds[2] = {0, 0};
-WallState wallState;
-ManualState manualState;
-PairedRemote pairedRemotes[kMaxPairedRemotes];
-size_t pairedRemoteCount = 0;
-ReceiverPairingState receiverPairing;
+AppMode appMode = AppMode::Receiver;
+int currentControllerIndex = -1;
+ControllerEntry controllers[kMaxControllerCount];
+size_t controllerCount = 0;
 char serialLine[kMaxLineLength] = {};
 size_t serialLineLength = 0;
-uint32_t lastRxFrame = 0;
-uint32_t lastDisplayedRxFrame = 0;
+uint32_t lastDisplayedFrame = 0;
+bool lastDisplayedFrameValid = false;
+PairingState pairingState;
+ClearConfirmState clearConfirmState;
 
-void savePairedRemotes();
-
-size_t modeIndex(ProtocolMode mode) {
-  return mode == ProtocolMode::Wall ? 0U : 1U;
-}
-
-uint32_t &remoteIdForMode(ProtocolMode mode) {
-  return remoteIds[modeIndex(mode)];
-}
-
-uint32_t &currentRemoteId() {
-  return remoteIdForMode(currentMode);
-}
+void saveControllers();
+void printPrompt();
 
 bool equalsIgnoreCase(const char *left, const char *right) {
   if (left == nullptr || right == nullptr) {
@@ -215,43 +259,60 @@ size_t splitTokens(char *text, char **tokens, size_t maxTokens) {
   return count;
 }
 
-const char *modeName(ProtocolMode mode) {
-  switch (mode) {
-    case ProtocolMode::Wall:
-      return "wall";
-    case ProtocolMode::Manual:
-      return "manual";
-    case ProtocolMode::Receiver:
-      return "receiver";
+const char *profileName(ControllerProfile profile) {
+  if (profile == ControllerProfile::Wall) {
+    return "wall";
   }
-
-  return "manual";
+  return profile == ControllerProfile::Qiachip ? "qiachip" : "remote";
 }
 
-bool parseMode(const char *text, ProtocolMode &mode) {
+bool parseProfile(const char *text, ControllerProfile &profile) {
   if (equalsIgnoreCase(text, "wall")) {
-    mode = ProtocolMode::Wall;
+    profile = ControllerProfile::Wall;
     return true;
   }
-  if (equalsIgnoreCase(text, "manual")) {
-    mode = ProtocolMode::Manual;
+  if (equalsIgnoreCase(text, "remote")) {
+    profile = ControllerProfile::Remote;
     return true;
   }
-  if (equalsIgnoreCase(text, "receiver")) {
-    mode = ProtocolMode::Receiver;
+  if (equalsIgnoreCase(text, "qiachip")) {
+    profile = ControllerProfile::Qiachip;
     return true;
   }
   return false;
 }
 
-bool parseRemoteId(const char *text, uint32_t &value) {
+bool parseUnsigned(const char *text, unsigned long &value) {
   if (text == nullptr || *text == '\0') {
     return false;
   }
 
   char *end = nullptr;
   const unsigned long parsed = strtoul(text, &end, 0);
-  if (end == text || *end != '\0' || parsed > 0xFFFFFUL) {
+  if (end == text || *end != '\0') {
+    return false;
+  }
+
+  value = parsed;
+  return true;
+}
+
+bool parseControllerId(const char *text, uint32_t &value) {
+  if (text == nullptr || *text == '\0') {
+    return false;
+  }
+
+  const char *cursor = text;
+  if (startsWithIgnoreCase(cursor, "0x")) {
+    cursor += 2;
+  }
+  if (*cursor == '\0') {
+    return false;
+  }
+
+  char *end = nullptr;
+  const unsigned long parsed = strtoul(cursor, &end, 16);
+  if (end == cursor || *end != '\0' || parsed > 0xFFFFFUL) {
     return false;
   }
 
@@ -259,279 +320,28 @@ bool parseRemoteId(const char *text, uint32_t &value) {
   return true;
 }
 
-DecodedFrame decodeFrame(uint32_t frame) {
-  DecodedFrame decoded;
-  decoded.raw = frame;
-  decoded.id = (frame >> 12) & 0xFFFFFUL;
-  decoded.command = static_cast<uint8_t>((frame >> 8) & 0x0F);
-  decoded.x = static_cast<uint8_t>((frame >> 4) & 0x0F);
-  decoded.y = static_cast<uint8_t>(frame & 0x0F);
-  decoded.key = 0x0A;
-  for (uint8_t index = 0; index < 5; ++index) {
-    decoded.key ^= static_cast<uint8_t>((decoded.id >> (index * 4)) & 0x0F);
-  }
-  decoded.key = static_cast<uint8_t>(decoded.key & 0x0F);
-  decoded.page = static_cast<uint8_t>((decoded.x >> 3) & 0x01);
-  decoded.manualFunction = static_cast<uint8_t>((decoded.page << 4) | decoded.command);
-  decoded.checksumOk = static_cast<uint8_t>(decoded.x ^ decoded.command ^ decoded.key) == decoded.y;
-  return decoded;
-}
-
-bool isPairingFrame(const DecodedFrame &decoded, ProtocolMode &profile) {
-  if (!decoded.checksumOk) {
+bool parseControllerIndex(const char *text, size_t &index) {
+  if (text == nullptr || *text == '\0') {
     return false;
   }
 
-  if (decoded.command == kWallBeep) {
-    profile = ProtocolMode::Wall;
-    return true;
+  const size_t length = strlen(text);
+  if (length == 0 || length > 2) {
+    return false;
   }
 
-  if (decoded.command == static_cast<uint8_t>(kManualFanOnOff & 0x0F) && decoded.page == 0) {
-    profile = ProtocolMode::Manual;
-    return true;
-  }
-
-  return false;
-}
-
-bool addPairedRemote(uint32_t id, ProtocolMode profile) {
-  for (size_t index = 0; index < pairedRemoteCount; ++index) {
-    if (pairedRemotes[index].id == id) {
-      if (pairedRemotes[index].profile == profile) {
-        Serial.printf("Receiver: %s id=0x%05lX already paired.\n", modeName(profile), static_cast<unsigned long>(id));
-      } else {
-        pairedRemotes[index].profile = profile;
-        savePairedRemotes();
-        Serial.printf("Receiver: id=0x%05lX profile updated to %s.\n", static_cast<unsigned long>(id), modeName(profile));
-      }
+  for (size_t i = 0; i < length; ++i) {
+    if (!isdigit(static_cast<unsigned char>(text[i]))) {
       return false;
     }
   }
 
-  if (pairedRemoteCount >= kMaxPairedRemotes) {
-    Serial.println("Receiver: paired list is full.");
+  unsigned long parsed = 0;
+  if (!parseUnsigned(text, parsed)) {
     return false;
   }
 
-  pairedRemotes[pairedRemoteCount].id = id;
-  pairedRemotes[pairedRemoteCount].profile = profile;
-  ++pairedRemoteCount;
-  savePairedRemotes();
-  return true;
-}
-
-bool isStoredProfile(uint8_t profile) {
-  return profile == static_cast<uint8_t>(ProtocolMode::Wall) || profile == static_cast<uint8_t>(ProtocolMode::Manual);
-}
-
-void savePairedRemotes() {
-  if (!preferencesReady) {
-    return;
-  }
-
-  preferences.putUChar(kPrefsPairCountKey, static_cast<uint8_t>(pairedRemoteCount));
-  if (pairedRemoteCount == 0) {
-    preferences.remove(kPrefsPairDataKey);
-    return;
-  }
-
-  StoredPairedRemote stored[kMaxPairedRemotes] = {};
-  for (size_t index = 0; index < pairedRemoteCount; ++index) {
-    stored[index].id = pairedRemotes[index].id;
-    stored[index].profile = static_cast<uint8_t>(pairedRemotes[index].profile);
-  }
-
-  preferences.putBytes(kPrefsPairDataKey, stored, pairedRemoteCount * sizeof(StoredPairedRemote));
-}
-
-void loadPairedRemotes() {
-  pairedRemoteCount = 0;
-  if (!preferencesReady) {
-    return;
-  }
-
-  const uint8_t storedCountRaw = preferences.getUChar(kPrefsPairCountKey, 0);
-  const size_t storedCount = storedCountRaw > kMaxPairedRemotes ? kMaxPairedRemotes : static_cast<size_t>(storedCountRaw);
-  if (storedCount == 0) {
-    return;
-  }
-
-  StoredPairedRemote stored[kMaxPairedRemotes] = {};
-  const size_t requestedBytes = storedCount * sizeof(StoredPairedRemote);
-  const size_t readBytes = preferences.getBytes(kPrefsPairDataKey, stored, requestedBytes);
-  const size_t readCount = readBytes / sizeof(StoredPairedRemote);
-
-  for (size_t index = 0; index < readCount; ++index) {
-    if (!isStoredProfile(stored[index].profile) || stored[index].id == 0 || pairedRemoteCount >= kMaxPairedRemotes) {
-      continue;
-    }
-
-    pairedRemotes[pairedRemoteCount].id = stored[index].id;
-    pairedRemotes[pairedRemoteCount].profile = static_cast<ProtocolMode>(stored[index].profile);
-    ++pairedRemoteCount;
-  }
-}
-
-void resetPairedRemotes() {
-  pairedRemoteCount = 0;
-  if (preferencesReady) {
-    preferences.remove(kPrefsPairCountKey);
-    preferences.remove(kPrefsPairDataKey);
-  }
-  Serial.println("Receiver: paired list reset.");
-}
-
-void startReceiverPairing() {
-  receiverPairing.active = true;
-  receiverPairing.startedAt = millis();
-  receiverPairing.candidateId = 0;
-  receiverPairing.candidateSince = 0;
-  receiverPairing.candidateLastSeen = 0;
-  Serial.println("Receiver pairing started: waiting up to 10s for a pairing command held for at least 2s.");
-}
-
-void handleReceiverPairingFrame(const DecodedFrame &decoded) {
-  if (!receiverPairing.active) {
-    return;
-  }
-
-  ProtocolMode detectedProfile = ProtocolMode::Manual;
-  if (!isPairingFrame(decoded, detectedProfile)) {
-    return;
-  }
-
-  const unsigned long now = millis();
-  const bool sameCandidate = receiverPairing.candidateId == decoded.id && receiverPairing.candidateProfile == detectedProfile;
-  const bool candidateExpired = receiverPairing.candidateLastSeen != 0 && (now - receiverPairing.candidateLastSeen) > kReceiverPairGapMs;
-
-  if (!sameCandidate || candidateExpired) {
-    receiverPairing.candidateId = decoded.id;
-    receiverPairing.candidateProfile = detectedProfile;
-    receiverPairing.candidateSince = now;
-    receiverPairing.candidateLastSeen = now;
-    Serial.printf("Receiver pairing: candidate profile=%s id=0x%05lX detected.\n",
-                  modeName(detectedProfile),
-                  static_cast<unsigned long>(decoded.id));
-    return;
-  }
-
-  receiverPairing.candidateLastSeen = now;
-  if ((now - receiverPairing.candidateSince) < kReceiverPairHoldMs) {
-    return;
-  }
-
-  if (addPairedRemote(decoded.id, detectedProfile)) {
-    Serial.printf("Receiver pairing success: profile=%s id=0x%05lX.\n",
-                  modeName(detectedProfile),
-                  static_cast<unsigned long>(decoded.id));
-  }
-  receiverPairing.active = false;
-}
-
-void checkReceiverPairingTimeout() {
-  if (!receiverPairing.active) {
-    return;
-  }
-
-  if ((millis() - receiverPairing.startedAt) < kReceiverPairWindowMs) {
-    return;
-  }
-
-  receiverPairing.active = false;
-  Serial.println("Receiver pairing timeout: no valid pairing command held for 2s.");
-}
-
-bool lookupPairedProfile(uint32_t id, ProtocolMode &profile) {
-  for (size_t index = 0; index < pairedRemoteCount; ++index) {
-    if (pairedRemotes[index].id == id) {
-      profile = pairedRemotes[index].profile;
-      return true;
-    }
-  }
-  return false;
-}
-
-const char *wallCommandName(uint8_t command) {
-  switch (command & 0x0F) {
-    case kWallBeep:
-      return "Beep";
-    case kWallReverseA:
-      return "ReverseA";
-    case kWallReverseB:
-      return "ReverseB";
-    case kWallSpeed1:
-      return "Speed1";
-    case kWallSpeed2:
-      return "Speed2";
-    case kWallSpeed3:
-      return "Speed3";
-    case kWallSpeed4:
-      return "Speed4";
-    case kWallSpeed5:
-      return "Speed5";
-    case kWallSpeed6:
-      return "Speed6";
-    case kWallLightOnOff:
-      return "Light";
-    case kWallFanOnOff:
-      return "Fan";
-    case kWallTimerOff:
-      return "TimerOff";
-    case kWallTimer1h:
-      return "Timer1h";
-    case kWallTimer2h:
-      return "Timer2h";
-    case kWallTimer4h:
-      return "Timer4h";
-    case kWallTimer8h:
-      return "Timer8h";
-    default:
-      return "UnknownCmd";
-  }
-}
-
-const char *manualFunctionName(uint8_t functionId) {
-  switch (functionId) {
-    case kManualSpeed1:
-      return "Speed1";
-    case kManualSpeed2:
-      return "Speed2";
-    case kManualSpeed3:
-      return "Speed3";
-    case kManualSpeed4:
-      return "Speed4";
-    case kManualSpeed5:
-      return "Speed5";
-    case kManualSpeed6:
-      return "Speed6";
-    case kManualLightOnOff:
-      return "Light";
-    case kManualFanOnOff:
-      return "Fan";
-    case kManualBeep:
-      return "Beep";
-    case kManualTemp:
-      return "Temp";
-    case kManualReverse:
-      return "Reverse";
-    case kManualTimer1h:
-      return "Timer1h";
-    case kManualTimer2h:
-      return "Timer2h";
-    case kManualTimer4h:
-      return "Timer4h";
-    default:
-      return "UnknownFn";
-  }
-}
-
-bool shouldDisplayReceiverFrame(uint32_t frame) {
-  if (frame == lastDisplayedRxFrame) {
-    return false;
-  }
-
-  lastDisplayedRxFrame = frame;
+  index = static_cast<size_t>(parsed);
   return true;
 }
 
@@ -543,486 +353,1034 @@ uint8_t keyFromId(uint32_t id) {
   return static_cast<uint8_t>(key & 0x0F);
 }
 
-uint32_t makeWallFrame(uint32_t id, uint8_t command, uint8_t counter) {
-  const uint8_t x = static_cast<uint8_t>(counter & 0x0F);
-  const uint8_t checksum = static_cast<uint8_t>(x ^ (command & 0x0F) ^ keyFromId(id));
-  return ((id & 0xFFFFFUL) << 12) |
-         (static_cast<uint32_t>(command & 0x0F) << 8) |
-         (static_cast<uint32_t>(x) << 4) |
-         static_cast<uint32_t>(checksum & 0x0F);
+DecodedFrame decodeFrame(uint32_t frame) {
+  DecodedFrame decoded;
+  decoded.raw = frame;
+  decoded.id = (frame >> 12) & 0xFFFFFUL;
+  decoded.command = static_cast<uint8_t>((frame >> 8) & 0x0F);
+  decoded.x = static_cast<uint8_t>((frame >> 4) & 0x0F);
+  decoded.y = static_cast<uint8_t>(frame & 0x0F);
+  decoded.key = keyFromId(decoded.id);
+  decoded.page = static_cast<uint8_t>((decoded.x >> 3) & 0x01);
+  decoded.manualFunction = static_cast<uint8_t>((decoded.page << 4) | decoded.command);
+  decoded.checksumOk = static_cast<uint8_t>(decoded.x ^ decoded.command ^ decoded.key) == decoded.y;
+  return decoded;
 }
 
-uint32_t makeManualFrame(uint32_t id, uint8_t functionId, uint8_t counter) {
-  const uint8_t page = static_cast<uint8_t>((functionId >> 4) & 0x01);
-  const uint8_t command = static_cast<uint8_t>(functionId & 0x0F);
-  const uint8_t x = static_cast<uint8_t>((page << 3) | (counter & 0x07));
-  const uint8_t checksum = static_cast<uint8_t>(x ^ command ^ keyFromId(id));
-  return ((id & 0xFFFFFUL) << 12) |
-         (static_cast<uint32_t>(command) << 8) |
-         (static_cast<uint32_t>(x) << 4) |
-         static_cast<uint32_t>(checksum & 0x0F);
-}
+bool isPairingFrame(const DecodedFrame &decoded, ControllerProfile &profile) {
+  if (!decoded.checksumOk) {
+    return false;
+  }
 
-void resetStates() {
-  wallState.counter = 0;
-  wallState.timerIndex = 0;
-  wallState.reverseUsesB = false;
-  manualState.pageCounter[0] = 0;
-  manualState.pageCounter[1] = 0;
-  manualState.timerIndex = 0;
-}
-
-bool ensureRemoteId() {
-  if (currentRemoteId() != 0) {
+  if (decoded.command == kWallBeep) {
+    profile = ControllerProfile::Wall;
     return true;
   }
 
-  Serial.printf("Remote ID not set for %s mode. Use: id 0xAB121\n", modeName(currentMode));
+  if (decoded.command == static_cast<uint8_t>(kManualFan & 0x0F) && decoded.page == 0) {
+    profile = ControllerProfile::Remote;
+    return true;
+  }
+
+  if (decoded.command == static_cast<uint8_t>(kQiachipPair & 0x0F) && decoded.page == 0) {
+    profile = ControllerProfile::Qiachip;
+    return true;
+  }
+
   return false;
 }
 
-bool isReceiverMode() {
-  return currentMode == ProtocolMode::Receiver;
+ControllerEntry *currentControllerMutable() {
+  if (currentControllerIndex < 0 || currentControllerIndex >= static_cast<int>(controllerCount)) {
+    return nullptr;
+  }
+  return &controllers[currentControllerIndex];
 }
 
-bool sendWallCommand(uint8_t command, const char *label, bool incrementCounter) {
-  if (isReceiverMode()) {
-    Serial.println("Receiver mode is read-only.");
+const ControllerEntry *currentController() {
+  if (currentControllerIndex < 0 || currentControllerIndex >= static_cast<int>(controllerCount)) {
+    return nullptr;
+  }
+  return &controllers[currentControllerIndex];
+}
+
+size_t findControllerIndex(uint32_t id) {
+  for (size_t index = 0; index < controllerCount; ++index) {
+    if (controllers[index].id == id) {
+      return index;
+    }
+  }
+  return static_cast<size_t>(-1);
+}
+
+bool hasController(uint32_t id) {
+  return findControllerIndex(id) != static_cast<size_t>(-1);
+}
+
+bool addController(uint32_t id, ControllerProfile profile) {
+  if (id == 0) {
+    Serial.println("Add failed: invalid ID.");
     return false;
   }
-  if (!ensureRemoteId()) {
+  if (hasController(id)) {
+    Serial.printf("Add failed: ID 0x%05lX already exists.\n", static_cast<unsigned long>(id));
+    return false;
+  }
+  if (controllerCount >= kMaxControllerCount) {
+    Serial.println("Add failed: database is full.");
     return false;
   }
 
-  const uint32_t remoteId = currentRemoteId();
-  const uint8_t counter = wallState.counter;
-  const uint32_t frame = makeWallFrame(remoteId, command, counter);
+  controllers[controllerCount].id = id;
+  controllers[controllerCount].profile = profile;
+  controllers[controllerCount].data = {};
+  ++controllerCount;
+  saveControllers();
+  Serial.printf("Added 0x%05lX profile=%s.\n", static_cast<unsigned long>(id), profileName(profile));
+  return true;
+}
+
+bool removeController(uint32_t id) {
+  const size_t index = findControllerIndex(id);
+  if (index == static_cast<size_t>(-1)) {
+    Serial.printf("Remove failed: unknown ID 0x%05lX.\n", static_cast<unsigned long>(id));
+    return false;
+  }
+
+  for (size_t i = index + 1; i < controllerCount; ++i) {
+    controllers[i - 1] = controllers[i];
+  }
+  --controllerCount;
+
+  if (currentControllerIndex == static_cast<int>(index)) {
+    currentControllerIndex = -1;
+    appMode = AppMode::Receiver;
+  } else if (currentControllerIndex > static_cast<int>(index)) {
+    --currentControllerIndex;
+  }
+
+  saveControllers();
+  Serial.printf("Removed 0x%05lX.\n", static_cast<unsigned long>(id));
+  return true;
+}
+
+void resetControllerList() {
+  controllerCount = 0;
+  currentControllerIndex = -1;
+  appMode = AppMode::Receiver;
+  if (preferencesReady) {
+    preferences.remove(kPrefsCountKey);
+    preferences.remove(kPrefsDataKey);
+  }
+  Serial.println("Database cleared.");
+}
+
+void saveControllers() {
+  if (!preferencesReady) {
+    return;
+  }
+
+  preferences.putUChar(kPrefsCountKey, static_cast<uint8_t>(controllerCount));
+  if (controllerCount == 0) {
+    preferences.remove(kPrefsDataKey);
+    return;
+  }
+
+  StoredControllerEntry stored[kMaxControllerCount] = {};
+  for (size_t index = 0; index < controllerCount; ++index) {
+    stored[index].id = controllers[index].id;
+    stored[index].profile = static_cast<uint8_t>(controllers[index].profile);
+    stored[index].data = controllers[index].data;
+  }
+  preferences.putBytes(kPrefsDataKey, stored, controllerCount * sizeof(StoredControllerEntry));
+}
+
+void loadControllers() {
+  controllerCount = 0;
+  if (!preferencesReady) {
+    return;
+  }
+
+  const uint8_t storedCountRaw = preferences.getUChar(kPrefsCountKey, 0);
+  const size_t storedCount = storedCountRaw > kMaxControllerCount ? kMaxControllerCount : static_cast<size_t>(storedCountRaw);
+  if (storedCount == 0) {
+    return;
+  }
+
+  StoredControllerEntry stored[kMaxControllerCount] = {};
+  const size_t requestedBytes = storedCount * sizeof(StoredControllerEntry);
+  const size_t readBytes = preferences.getBytes(kPrefsDataKey, stored, requestedBytes);
+  const size_t readCount = readBytes / sizeof(StoredControllerEntry);
+
+  for (size_t index = 0; index < readCount && controllerCount < kMaxControllerCount; ++index) {
+    if (stored[index].id == 0) {
+      continue;
+    }
+    if (stored[index].profile != static_cast<uint8_t>(ControllerProfile::Wall) &&
+        stored[index].profile != static_cast<uint8_t>(ControllerProfile::Remote) &&
+        stored[index].profile != static_cast<uint8_t>(ControllerProfile::Qiachip)) {
+      continue;
+    }
+
+    controllers[controllerCount].id = stored[index].id;
+    controllers[controllerCount].profile = static_cast<ControllerProfile>(stored[index].profile);
+    controllers[controllerCount].data = stored[index].data;
+    ++controllerCount;
+  }
+}
+
+bool lookupControllerProfile(uint32_t id, ControllerProfile &profile) {
+  const size_t index = findControllerIndex(id);
+  if (index == static_cast<size_t>(-1)) {
+    return false;
+  }
+  profile = controllers[index].profile;
+  return true;
+}
+
+bool shouldDisplayFrame(uint32_t frame) {
+  if (lastDisplayedFrameValid && frame == lastDisplayedFrame) {
+    return false;
+  }
+  lastDisplayedFrame = frame;
+  lastDisplayedFrameValid = true;
+  return true;
+}
+
+bool sendFrame(uint32_t frame) {
   radio.send(frame, kFrameBitLength);
+  return true;
+}
 
-  Serial.printf("TX %s mode=wall id=0x%05lX key=0x%X cmd=0x%X counter=0x%X frame=0x%08lX\n",
+bool sendWallAction(ControllerEntry &controller, uint8_t command, const char *label, bool incrementCounter) {
+  const uint8_t counter = controller.data.wall.counter;
+  const uint32_t frame = ((controller.id & 0xFFFFFUL) << 12) |
+                         (static_cast<uint32_t>(command & 0x0F) << 8) |
+                         (static_cast<uint32_t>(counter & 0x0F) << 4) |
+                         static_cast<uint32_t>((counter ^ command ^ keyFromId(controller.id)) & 0x0F);
+  sendFrame(frame);
+  Serial.printf("TX %s id=0x%05lX profile=wall cmd=0x%X cnt=0x%X frame=0x%08lX\n",
                 label,
-                static_cast<unsigned long>(remoteId),
-                keyFromId(remoteId),
+                static_cast<unsigned long>(controller.id),
                 command,
                 counter,
                 static_cast<unsigned long>(frame));
-
   if (incrementCounter) {
-    wallState.counter = static_cast<uint8_t>((wallState.counter + 1) & 0x0F);
+    controller.data.wall.counter = static_cast<uint8_t>((controller.data.wall.counter + 1) & 0x0F);
+    saveControllers();
   }
   return true;
 }
 
-bool sendManualFunction(uint8_t functionId, const char *label, bool incrementCounter) {
-  if (isReceiverMode()) {
-    Serial.println("Receiver mode is read-only.");
-    return false;
-  }
-  if (!ensureRemoteId()) {
-    return false;
-  }
-
-  const uint32_t remoteId = currentRemoteId();
+bool sendManualAction(ControllerEntry &controller, uint8_t functionId, const char *label, bool incrementCounter) {
   const uint8_t page = static_cast<uint8_t>((functionId >> 4) & 0x01);
-  const uint8_t counter = manualState.pageCounter[page];
-  const uint32_t frame = makeManualFrame(remoteId, functionId, counter);
-  radio.send(frame, kFrameBitLength);
-
-  Serial.printf("TX %s mode=manual id=0x%05lX key=0x%X function=0x%02X page=%u counter=%u frame=0x%08lX\n",
+  const uint8_t counter = controller.data.manual.counter;
+  const uint8_t command = static_cast<uint8_t>(functionId & 0x0F);
+  const uint8_t x = static_cast<uint8_t>((page << 3) | (counter & 0x07));
+  const uint32_t frame = ((controller.id & 0xFFFFFUL) << 12) |
+                         (static_cast<uint32_t>(command) << 8) |
+                         (static_cast<uint32_t>(x) << 4) |
+                         static_cast<uint32_t>((x ^ command ^ keyFromId(controller.id)) & 0x0F);
+  sendFrame(frame);
+  Serial.printf("TX %s id=0x%05lX profile=remote fn=0x%02X cnt=0x%X frame=0x%08lX\n",
                 label,
-                static_cast<unsigned long>(remoteId),
-                keyFromId(remoteId),
+                static_cast<unsigned long>(controller.id),
                 functionId,
-                page,
                 counter,
                 static_cast<unsigned long>(frame));
-
   if (incrementCounter) {
-    manualState.pageCounter[page] = static_cast<uint8_t>((manualState.pageCounter[page] + 1) & 0x07);
+    controller.data.manual.counter = static_cast<uint8_t>((controller.data.manual.counter + 1) & 0x07);
+    saveControllers();
   }
   return true;
 }
 
-bool sendCurrentModeCommand(uint8_t wallCommand, uint8_t manualFunction, const char *label) {
-  if (currentMode == ProtocolMode::Wall) {
-    return sendWallCommand(wallCommand, label, true);
+bool sendPairBurst(ControllerEntry &controller, unsigned long durationMs) {
+  const unsigned long startedAt = millis();
+  while (millis() - startedAt < durationMs) {
+    if (controller.profile == ControllerProfile::Wall) {
+      sendWallAction(controller, kWallBeep, "Pair", false);
+    } else if (controller.profile == ControllerProfile::Qiachip) {
+      sendManualAction(controller, kQiachipPair, "Pair", false);
+    } else {
+      sendManualAction(controller, kManualFan, "Pair", false);
+    }
+    delay(kPairRepeatMs);
   }
-  return sendManualFunction(manualFunction, label, true);
+  Serial.println("Pair finished.");
+  return true;
 }
 
-bool sendTimerHours(uint8_t hours) {
-  if (currentMode == ProtocolMode::Manual) {
-    switch (hours) {
+bool sendQiachipLight(ControllerEntry &controller) {
+  return sendManualAction(controller, kQiachipLight, "Light", true);
+}
+
+bool sendQiachipStop(ControllerEntry &controller) {
+  return sendManualAction(controller, kQiachipStop, "Stop", true);
+}
+
+bool sendQiachipSpeed(ControllerEntry &controller, uint8_t speed) {
+  switch (speed) {
+    case 1:
+      return sendManualAction(controller, kQiachipSpeed1, "Speed1", true);
+    case 2:
+      return sendManualAction(controller, kQiachipSpeed2, "Speed2", true);
+    case 3:
+      return sendManualAction(controller, kQiachipSpeed3, "Speed3", true);
+    default:
+      Serial.println("Qiachip supports Speed 1, 2 or 3 only.");
+      return false;
+  }
+}
+
+bool sendQiachipTimer(ControllerEntry &controller, bool hasValue, uint8_t value) {
+  if (!hasValue) {
+    Serial.println("Timer requires a value for profile qiachip.");
+    return false;
+  }
+
+  switch (value) {
+    case 1:
+      return sendManualAction(controller, kQiachipTimer1, "Timer1", true);
+    case 2:
+      return sendManualAction(controller, kQiachipTimer2, "Timer2", true);
+    case 4:
+      return sendManualAction(controller, kQiachipTimer4, "Timer4", true);
+    case 8:
+      return sendManualAction(controller, kQiachipTimer8, "Timer8", true);
+    default:
+      Serial.println("Qiachip supports Timer 1, 2, 4 or 8 only.");
+      return false;
+  }
+}
+
+bool sendLight(ControllerEntry &controller) {
+  return controller.profile == ControllerProfile::Wall
+           ? sendWallAction(controller, kWallLight, "Light", true)
+           : sendManualAction(controller, kManualLight, "Light", true);
+}
+
+bool sendFan(ControllerEntry &controller) {
+  return controller.profile == ControllerProfile::Wall
+           ? sendWallAction(controller, kWallFan, "Fan", true)
+           : sendManualAction(controller, kManualFan, "Fan", true);
+}
+
+bool sendBeep(ControllerEntry &controller) {
+  return controller.profile == ControllerProfile::Wall
+           ? sendWallAction(controller, kWallBeep, "Beep", true)
+           : sendManualAction(controller, kManualBeep, "Beep", true);
+}
+
+bool sendReverse(ControllerEntry &controller) {
+  if (controller.profile == ControllerProfile::Wall) {
+    const uint8_t command = controller.data.wall.reverseUsesB ? kWallReverseB : kWallReverseA;
+    const bool ok = sendWallAction(controller, command, "Reverse", true);
+    if (ok) {
+      controller.data.wall.reverseUsesB = controller.data.wall.reverseUsesB ? 0 : 1;
+      saveControllers();
+    }
+    return ok;
+  }
+  return sendManualAction(controller, kManualReverse, "Reverse", true);
+}
+
+bool sendTemp(ControllerEntry &controller) {
+  if (controller.profile == ControllerProfile::Wall) {
+    Serial.println("Temp is not valid for profile wall.");
+    return false;
+  }
+  return sendManualAction(controller, kManualTemp, "Temp", true);
+}
+
+bool sendSpeed(ControllerEntry &controller, uint8_t speed) {
+  switch (speed) {
+    case 1:
+      return controller.profile == ControllerProfile::Wall ? sendWallAction(controller, kWallSpeed1, "Speed1", true) : sendManualAction(controller, kManualSpeed1, "Speed1", true);
+    case 2:
+      return controller.profile == ControllerProfile::Wall ? sendWallAction(controller, kWallSpeed2, "Speed2", true) : sendManualAction(controller, kManualSpeed2, "Speed2", true);
+    case 3:
+      return controller.profile == ControllerProfile::Wall ? sendWallAction(controller, kWallSpeed3, "Speed3", true) : sendManualAction(controller, kManualSpeed3, "Speed3", true);
+    case 4:
+      return controller.profile == ControllerProfile::Wall ? sendWallAction(controller, kWallSpeed4, "Speed4", true) : sendManualAction(controller, kManualSpeed4, "Speed4", true);
+    case 5:
+      return controller.profile == ControllerProfile::Wall ? sendWallAction(controller, kWallSpeed5, "Speed5", true) : sendManualAction(controller, kManualSpeed5, "Speed5", true);
+    case 6:
+      return controller.profile == ControllerProfile::Wall ? sendWallAction(controller, kWallSpeed6, "Speed6", true) : sendManualAction(controller, kManualSpeed6, "Speed6", true);
+    default:
+      Serial.println("Speed must be between 1 and 6.");
+      return false;
+  }
+}
+
+bool sendTimer(ControllerEntry &controller, bool hasValue, uint8_t value) {
+  if (controller.profile == ControllerProfile::Remote) {
+    if (!hasValue) {
+      Serial.println("Timer without parameter is invalid for profile remote.");
+      return false;
+    }
+    switch (value) {
       case 1:
-        manualState.timerIndex = 1;
-        return sendManualFunction(kManualTimer1h, "Timer1h", true);
+        controller.data.manual.timerIndex = 0;
+        return sendManualAction(controller, kManualTimer1h, "Timer1h", true);
       case 2:
-        manualState.timerIndex = 2;
-        return sendManualFunction(kManualTimer2h, "Timer2h", true);
+        controller.data.manual.timerIndex = 1;
+        return sendManualAction(controller, kManualTimer2h, "Timer2h", true);
       case 4:
-        manualState.timerIndex = 0;
-        return sendManualFunction(kManualTimer4h, "Timer4h", true);
+        controller.data.manual.timerIndex = 2;
+        return sendManualAction(controller, kManualTimer4h, "Timer4h", true);
       default:
-        Serial.println("Manual mode supports Timer1h, Timer2h and Timer4h only.");
+        Serial.println("Remote profile supports Timer 1, 2 or 4 only.");
         return false;
     }
   }
 
-  switch (hours) {
+  if (!hasValue) {
+    const uint8_t command = kWallTimerCycle[controller.data.wall.timerIndex % 5];
+    const bool ok = sendWallAction(controller, command, command == kWallTimerOff ? "TimerOff" : "Timer", true);
+    if (ok) {
+      controller.data.wall.timerIndex = static_cast<uint8_t>((controller.data.wall.timerIndex + 1) % 5);
+      saveControllers();
+    }
+    return ok;
+  }
+
+  switch (value) {
+    case 0:
+      controller.data.wall.timerIndex = 4;
+      return sendWallAction(controller, kWallTimerOff, "TimerOff", true);
     case 1:
-      wallState.timerIndex = 1;
-      return sendWallCommand(kWallTimer1h, "Timer1h", true);
+      controller.data.wall.timerIndex = 0;
+      return sendWallAction(controller, kWallTimer1h, "Timer1h", true);
     case 2:
-      wallState.timerIndex = 2;
-      return sendWallCommand(kWallTimer2h, "Timer2h", true);
+      controller.data.wall.timerIndex = 1;
+      return sendWallAction(controller, kWallTimer2h, "Timer2h", true);
     case 4:
-      wallState.timerIndex = 3;
-      return sendWallCommand(kWallTimer4h, "Timer4h", true);
+      controller.data.wall.timerIndex = 2;
+      return sendWallAction(controller, kWallTimer4h, "Timer4h", true);
     case 8:
-      wallState.timerIndex = 4;
-      return sendWallCommand(kWallTimer8h, "Timer8h", true);
+      controller.data.wall.timerIndex = 3;
+      return sendWallAction(controller, kWallTimer8h, "Timer8h", true);
     default:
-      Serial.println("Wall mode supports Timer1h, Timer2h, Timer4h and Timer8h only.");
+      Serial.println("Wall profile supports Timer 0, 1, 2, 4 or 8 only.");
       return false;
   }
 }
 
-bool sendTimerCycle() {
-  if (currentMode == ProtocolMode::Manual) {
-    const uint8_t functionId = kManualTimerCycle[manualState.timerIndex % 3];
-    const bool ok = sendManualFunction(functionId, "Timer", true);
-    if (ok) {
-      manualState.timerIndex = static_cast<uint8_t>((manualState.timerIndex + 1) % 3);
-    }
-    return ok;
-  }
-
-  const uint8_t command = kWallTimerCycle[wallState.timerIndex % 5];
-  const bool ok = sendWallCommand(command, command == kWallTimerOff ? "TimerOff" : "Timer", true);
-  if (ok) {
-    wallState.timerIndex = static_cast<uint8_t>((wallState.timerIndex + 1) % 5);
-  }
-  return ok;
+bool isPairingCandidate(const DecodedFrame &decoded, ControllerProfile &profile) {
+  return isPairingFrame(decoded, profile);
 }
 
-bool sendTimerOff() {
-  if (currentMode != ProtocolMode::Wall || isReceiverMode()) {
-    Serial.println("TimerOff is only available in wall mode.");
+void startPairing(unsigned long timeoutMs) {
+  pairingState.active = true;
+  pairingState.startedAt = millis();
+  pairingState.timeoutMs = timeoutMs;
+  pairingState.candidateId = 0;
+  pairingState.candidateSince = 0;
+  pairingState.candidateLastSeen = 0;
+  Serial.printf("Pair: listening for pairing for %lus.\n", timeoutMs / 1000UL);
+}
+
+void finishPairingTimeout() {
+  pairingState.active = false;
+  Serial.println("Pair: pairing timeout.");
+}
+
+bool processPairingFrame(const DecodedFrame &decoded) {
+  if (!pairingState.active) {
     return false;
   }
 
-  const bool ok = sendWallCommand(kWallTimerOff, "TimerOff", true);
-  if (ok) {
-    wallState.timerIndex = 0;
-  }
-  return ok;
-}
-
-bool sendReverse() {
-  if (currentMode == ProtocolMode::Wall) {
-    const uint8_t command = wallState.reverseUsesB ? kWallReverseB : kWallReverseA;
-    const bool ok = sendWallCommand(command, "Reverse", true);
-    if (ok) {
-      wallState.reverseUsesB = !wallState.reverseUsesB;
-    }
-    return ok;
+  ControllerProfile detectedProfile = ControllerProfile::Remote;
+  if (!isPairingCandidate(decoded, detectedProfile)) {
+    return false;
   }
 
-  return sendManualFunction(kManualReverse, "Reverse", true);
-}
+  const unsigned long now = millis();
+  const bool sameCandidate = pairingState.candidateId == decoded.id && pairingState.candidateProfile == detectedProfile;
+  const bool candidateExpired = pairingState.candidateLastSeen != 0 && (now - pairingState.candidateLastSeen) > 500;
 
-bool sendPair() {
-  if (isReceiverMode()) {
-    startReceiverPairing();
+  if (!sameCandidate || candidateExpired) {
+    pairingState.candidateId = decoded.id;
+    pairingState.candidateProfile = detectedProfile;
+    pairingState.candidateSince = now;
+    pairingState.candidateLastSeen = now;
+    Serial.printf("Pair: candidate profile=%s id=0x%05lX detected.\n", profileName(detectedProfile), static_cast<unsigned long>(decoded.id));
     return true;
   }
 
-  if (!ensureRemoteId()) {
-    return false;
+  pairingState.candidateLastSeen = now;
+  if ((now - pairingState.candidateSince) < kPairHoldMs) {
+    return true;
   }
 
-  const unsigned long startedAt = millis();
-  while (millis() - startedAt < kPairDurationMs) {
-    if (currentMode == ProtocolMode::Wall) {
-      sendWallCommand(kWallBeep, "pair", false);
-    } else {
-      sendManualFunction(kManualFanOnOff, "pair", false);
-    }
-    delay(kPairRepeatDelayMs);
+  if (addController(decoded.id, detectedProfile)) {
+    Serial.println("Pair: success.");
   }
-
-  Serial.println("pair finished.");
+  pairingState.active = false;
   return true;
 }
 
-void printStatus() {
-  const uint32_t wallRemoteId = remoteIdForMode(ProtocolMode::Wall);
-  const uint32_t manualRemoteId = remoteIdForMode(ProtocolMode::Manual);
-  Serial.printf("mode=%s wallId=0x%05lX wallKey=0x%X manualId=0x%05lX manualKey=0x%X wall[counter=%u timer=%u reverseNext=%u] manual[counterP0=%u counterP1=%u timer=%u] receiver[pairing=%s paired=%u]\n",
-                modeName(currentMode),
-                static_cast<unsigned long>(wallRemoteId),
-                keyFromId(wallRemoteId),
-                static_cast<unsigned long>(manualRemoteId),
-                keyFromId(manualRemoteId),
-                wallState.counter,
-                wallState.timerIndex,
-                wallState.reverseUsesB ? 2 : 1,
-                manualState.pageCounter[0],
-                manualState.pageCounter[1],
-                manualState.timerIndex,
-                receiverPairing.active ? "on" : "off",
-                static_cast<unsigned int>(pairedRemoteCount));
-
-  for (size_t index = 0; index < pairedRemoteCount; ++index) {
-    Serial.printf("  paired[%u] id=0x%05lX profile=%s\n",
-                  static_cast<unsigned int>(index),
-                  static_cast<unsigned long>(pairedRemotes[index].id),
-                  modeName(pairedRemotes[index].profile));
+void checkPairingTimeout() {
+  if (!pairingState.active) {
+    return;
   }
+  if ((millis() - pairingState.startedAt) >= pairingState.timeoutMs) {
+    finishPairingTimeout();
+  }
+}
+
+void printControllerData(const ControllerEntry &controller) {
+  Serial.printf("id=0x%05lX profile=%s ", static_cast<unsigned long>(controller.id), profileName(controller.profile));
+  const uint8_t key = keyFromId(controller.id);
+  if (controller.profile == ControllerProfile::Wall) {
+    Serial.printf("data[wall counter=%u timer=%u reverseNext=%u key=0x%X]\n",
+                  controller.data.wall.counter,
+                  controller.data.wall.timerIndex,
+                  controller.data.wall.reverseUsesB ? 2 : 1,
+                  key);
+    return;
+  }
+
+  Serial.printf("data[remote counter=%u timer=%u key=0x%X]\n",
+                controller.data.manual.counter,
+                controller.data.manual.timerIndex,
+                key);
 }
 
 void printHelp() {
-  Serial.println("UART commands:");
-  Serial.println("  wall | manual | receiver");
-  Serial.println("  id 0x146CD   (sets the ID for the current mode)");
-  Serial.println("  Light");
-  Serial.println("  Temp");
-  Serial.println("  Speed1..Speed6 or Speed <1..6>");
-  Serial.println("  Fan");
-  Serial.println("  Timer1h | Timer2h | Timer4h | Timer8h");
-  Serial.println("  Timer | TimerOff");
-  Serial.println("  Reverse");
-  Serial.println("  Beep");
-  Serial.println("  pair   (TX pair in wall/manual, or start pairing capture in receiver)");
-  Serial.println("  reset   (clear paired receiver list)");
-  Serial.println("  status");
-  Serial.println("  help");
+  Serial.println("Commands:");
+  if (appMode == AppMode::Receiver) {
+    Serial.println("  Pair [<ID> <profile> | <time>]");
+    Serial.println("  Remove <ID|index> | rm <ID|index>");
+    Serial.println("  List | ls");
+    Serial.println("  Clear [-f]");
+    Serial.println("  Use <ID|index>");
+  } else {
+    const ControllerEntry *controller = currentController();
+    const bool isControllerProfile = controller != nullptr && controller->profile == ControllerProfile::Remote;
+    const bool isQiachipProfile = controller != nullptr && controller->profile == ControllerProfile::Qiachip;
+    if (isQiachipProfile) {
+      Serial.println("  Light");
+      Serial.println("  Speed <1..3>");
+      Serial.println("  Stop");
+      Serial.println("  Timer 1|2|4|8");
+    } else if (isControllerProfile) {
+      Serial.println("  Light");
+      Serial.println("  Temp");
+      Serial.println("  Speed <1..6>");
+      Serial.println("  Fan");
+      Serial.println("  Timer 1|2|4");
+    } else {
+      Serial.println("  Light");
+      Serial.println("  Temp");
+      Serial.println("  Speed <1..6>");
+      Serial.println("  Fan");
+      Serial.println("  Timer [<0,1,2,4,8>]");
+    }
+    if (!isQiachipProfile) {
+      Serial.println("  Reverse");
+      Serial.println("  Beep");
+    }
+    Serial.println("  Pair [<time>]");
+    Serial.println("  Exit");
+  }
+  Serial.println("  Help | ?");
+  Serial.println("  Status");
+}
+
+void printStatus() {
+  if (appMode == AppMode::Receiver) {
+    Serial.printf("mode=receiver controllers=%u pairing=%s\n",
+                  static_cast<unsigned int>(controllerCount),
+                  pairingState.active ? "on" : "off");
+    for (size_t index = 0; index < controllerCount; ++index) {
+      Serial.printf("  [%u] id=0x%05lX profile=%s\n",
+                    static_cast<unsigned int>(index),
+                    static_cast<unsigned long>(controllers[index].id),
+                    profileName(controllers[index].profile));
+    }
+    return;
+  }
+
+  const ControllerEntry *controller = currentController();
+  if (controller == nullptr) {
+    Serial.println("mode=controller (no selected controller)");
+    return;
+  }
+
+  printControllerData(*controller);
 }
 
 void printPrompt() {
+  if (appMode == AppMode::Controller) {
+    const ControllerEntry *controller = currentController();
+    if (controller != nullptr) {
+      Serial.printf("0x%05lX> ", static_cast<unsigned long>(controller->id));
+      return;
+    }
+  }
   Serial.print("> ");
 }
 
-void setMode(ProtocolMode mode) {
-  currentMode = mode;
-  Serial.printf("Mode changed to %s. This mode keeps its own ID, counters and cycle state.\n", modeName(currentMode));
-}
-
-bool handleSpeedTokens(char **tokens, size_t tokenCount) {
-  int speed = -1;
-
-  if (startsWithIgnoreCase(tokens[0], "Speed") && strlen(tokens[0]) > 5) {
-    speed = atoi(tokens[0] + 5);
-  } else if (equalsIgnoreCase(tokens[0], "Speed") && tokenCount >= 2) {
-    speed = atoi(tokens[1]);
+void addAmbiguousCommand(const char *commandName,
+                         const char **commands,
+                         size_t capacity,
+                         size_t *count) {
+  for (size_t index = 0; index < *count; ++index) {
+    if (equalsIgnoreCase(commands[index], commandName)) {
+      return;
+    }
   }
-
-  switch (speed) {
-    case 1:
-      return sendCurrentModeCommand(kWallSpeed1, kManualSpeed1, "Speed1");
-    case 2:
-      return sendCurrentModeCommand(kWallSpeed2, kManualSpeed2, "Speed2");
-    case 3:
-      return sendCurrentModeCommand(kWallSpeed3, kManualSpeed3, "Speed3");
-    case 4:
-      return sendCurrentModeCommand(kWallSpeed4, kManualSpeed4, "Speed4");
-    case 5:
-      return sendCurrentModeCommand(kWallSpeed5, kManualSpeed5, "Speed5");
-    case 6:
-      return sendCurrentModeCommand(kWallSpeed6, kManualSpeed6, "Speed6");
-    default:
-      return false;
+  if (*count < capacity) {
+    commands[*count] = commandName;
+    ++(*count);
   }
 }
 
-bool handleTimerTokens(char **tokens, size_t tokenCount) {
-  if (equalsIgnoreCase(tokens[0], "Timer")) {
-    if (tokenCount == 1) {
-      return sendTimerCycle();
+void printAmbiguousCommand(const char *token, const char **commands, size_t count) {
+  Serial.printf("Ambiguous command: %s [", token);
+  for (size_t index = 0; index < count; ++index) {
+    if (index > 0) {
+      Serial.print(", ");
     }
+    Serial.print(commands[index]);
+  }
+  Serial.println("]");
+}
 
-    if (equalsIgnoreCase(tokens[1], "Off")) {
-      return sendTimerOff();
+CommandId resolveCommand(const char *token, const char **ambiguousCommands, size_t ambiguousCapacity, size_t *ambiguousCount) {
+  if (ambiguousCount != nullptr) {
+    *ambiguousCount = 0;
+  }
+
+  static const CommandSpec specs[] = {
+      {CommandId::Help, {"help", "?"}, 2, true, true},
+      {CommandId::Status, {"status"}, 1, true, true},
+      {CommandId::Remove, {"remove", "rm"}, 2, true, false},
+      {CommandId::List, {"list", "ls"}, 2, true, false},
+      {CommandId::Clear, {"clear"}, 1, true, false},
+      {CommandId::Use, {"use"}, 1, true, false},
+      {CommandId::Exit, {"exit"}, 1, false, true},
+      {CommandId::Light, {"light"}, 1, false, true},
+      {CommandId::Temp, {"temp", "tmp"}, 2, false, true},
+      {CommandId::Speed, {"speed"}, 1, false, true},
+      {CommandId::Fan, {"fan"}, 1, false, true},
+      {CommandId::Stop, {"stop"}, 1, false, true},
+      {CommandId::Timer, {"timer", "tmr"}, 2, false, true},
+      {CommandId::Reverse, {"reverse"}, 1, false, true},
+      {CommandId::Beep, {"beep"}, 1, false, true},
+        {CommandId::Pair, {"pair"}, 1, true, true},
+  };
+
+  const ControllerEntry *controller = appMode == AppMode::Controller ? currentController() : nullptr;
+  const bool isQiachipProfile = controller != nullptr && controller->profile == ControllerProfile::Qiachip;
+
+  CommandId match = CommandId::Unknown;
+  for (const CommandSpec &spec : specs) {
+    const bool allowed = appMode == AppMode::Receiver ? spec.receiverAllowed : spec.controllerAllowed;
+    if (!allowed) {
+      continue;
     }
-
-    char timerToken[12];
-    strncpy(timerToken, tokens[1], sizeof(timerToken) - 1);
-    timerToken[sizeof(timerToken) - 1] = '\0';
-    const size_t length = strlen(timerToken);
-    if (length > 0 && (timerToken[length - 1] == 'h' || timerToken[length - 1] == 'H')) {
-      timerToken[length - 1] = '\0';
+    if (appMode == AppMode::Controller) {
+      if (isQiachipProfile) {
+        if (spec.id == CommandId::Fan || spec.id == CommandId::Reverse || spec.id == CommandId::Beep) {
+          continue;
+        }
+      } else if (spec.id == CommandId::Stop) {
+        continue;
+      }
     }
+    bool specMatched = false;
+    for (size_t index = 0; index < spec.keywordCount; ++index) {
+      if (equalsIgnoreCase(token, spec.keywords[index]) || startsWithIgnoreCase(token, spec.keywords[index]) || startsWithIgnoreCase(spec.keywords[index], token)) {
+        if (match != CommandId::Unknown) {
+          if (ambiguousCommands != nullptr && ambiguousCount != nullptr) {
+            addAmbiguousCommand(spec.keywords[0], ambiguousCommands, ambiguousCapacity, ambiguousCount);
+          }
+          return CommandId::Ambiguous;
+        }
+        match = spec.id;
+        specMatched = true;
+        break;
+      }
+    }
+    if (specMatched && ambiguousCommands != nullptr && ambiguousCount != nullptr) {
+      addAmbiguousCommand(spec.keywords[0], ambiguousCommands, ambiguousCapacity, ambiguousCount);
+    }
+  }
 
-    const int hours = atoi(timerToken);
-    if (hours <= 0) {
+  return match;
+}
+
+void enterReceiverMode() {
+  appMode = AppMode::Receiver;
+  currentControllerIndex = -1;
+}
+
+void enterControllerMode(size_t index) {
+  currentControllerIndex = static_cast<int>(index);
+  appMode = AppMode::Controller;
+}
+
+bool handleReceiverPair(char **tokens, size_t tokenCount) {
+  if (tokenCount == 1) {
+    startPairing(kDefaultPairTimeoutMs);
+    return true;
+  }
+
+  if (tokenCount == 2) {
+    unsigned long timeout = 0;
+    if (!parseUnsigned(tokens[1], timeout) || timeout == 0) {
+      Serial.println("Pair: invalid timeout.");
       return false;
     }
-    return sendTimerHours(static_cast<uint8_t>(hours));
+    startPairing(timeout * 1000UL);
+    return true;
   }
 
-  if (equalsIgnoreCase(tokens[0], "TimerOff")) {
-    return sendTimerOff();
+  if (tokenCount >= 3) {
+    uint32_t id = 0;
+    ControllerProfile profile = ControllerProfile::Remote;
+    if (!parseControllerId(tokens[1], id) || !parseProfile(tokens[2], profile)) {
+      Serial.println("Pair: usage Pair <ID> <profile> | Pair <time>");
+      return false;
+    }
+    return addController(id, profile);
   }
-  if (equalsIgnoreCase(tokens[0], "Timer1h")) {
-    return sendTimerHours(1);
-  }
-  if (equalsIgnoreCase(tokens[0], "Timer2h")) {
-    return sendTimerHours(2);
-  }
-  if (equalsIgnoreCase(tokens[0], "Timer4h")) {
-    return sendTimerHours(4);
-  }
-  if (equalsIgnoreCase(tokens[0], "Timer8h")) {
-    return sendTimerHours(8);
-  }
+
   return false;
 }
 
-void printReceivedFrame(uint32_t frame) {
-  const DecodedFrame decoded = decodeFrame(frame);
+bool handleReceiverCommand(CommandId command, char **tokens, size_t tokenCount) {
+  switch (command) {
+    case CommandId::Help:
+      printHelp();
+      return true;
+    case CommandId::Status:
+      printStatus();
+      return true;
+    case CommandId::Pair:
+      return handleReceiverPair(tokens, tokenCount);
+    case CommandId::Remove: {
+      if (tokenCount < 2) {
+        Serial.println("Remove: usage Remove <ID|index> | rm <ID|index>");
+        return false;
+      }
+      size_t index = static_cast<size_t>(-1);
+      uint32_t id = 0;
+      if (parseControllerIndex(tokens[1], index)) {
+        if (index >= controllerCount) {
+          Serial.printf("Remove: unknown index %u.\n", static_cast<unsigned int>(index));
+          return false;
+        }
+        id = controllers[index].id;
+      } else if (!parseControllerId(tokens[1], id)) {
+        Serial.println("Remove: invalid selector (expected ID or index).");
+        return false;
+      }
+      return removeController(id);
+    }
+    case CommandId::List:
+      for (size_t index = 0; index < controllerCount; ++index) {
+        Serial.printf("[%u] 0x%05lX %s\n",
+                      static_cast<unsigned int>(index),
+                      static_cast<unsigned long>(controllers[index].id),
+                      profileName(controllers[index].profile));
+      }
+      return true;
+    case CommandId::Clear:
+      if (tokenCount >= 2 && equalsIgnoreCase(tokens[1], "-f")) {
+        resetControllerList();
+        return true;
+      }
+      clearConfirmState.active = true;
+      Serial.print("Clear all controllers? [Y/n] ");
+      return true;
+    case CommandId::Use: {
+      if (tokenCount < 2) {
+        Serial.println("Use: usage Use <ID|index>");
+        return false;
+      }
+      size_t index = static_cast<size_t>(-1);
+      uint32_t id = 0;
+      if (parseControllerIndex(tokens[1], index)) {
+        if (index >= controllerCount) {
+          Serial.printf("Use: unknown index %u.\n", static_cast<unsigned int>(index));
+          return false;
+        }
+      } else {
+        if (!parseControllerId(tokens[1], id)) {
+          Serial.println("Use: invalid selector (expected ID or index).");
+          return false;
+        }
+        index = findControllerIndex(id);
+        if (index == static_cast<size_t>(-1)) {
+          Serial.printf("Use: unknown ID 0x%05lX.\n", static_cast<unsigned long>(id));
+          return false;
+        }
+      }
+      enterControllerMode(index);
+      printPrompt();
+      return true;
+    }
+    case CommandId::Unknown:
+      Serial.println("Unknown command.");
+      return false;
+    case CommandId::Ambiguous:
+      Serial.println("Ambiguous command.");
+      return false;
+    default:
+      Serial.println("Command not available in receiver mode.");
+      return false;
+  }
+}
 
+bool handleControllerCommand(CommandId command, char **tokens, size_t tokenCount) {
+  ControllerEntry *controller = currentControllerMutable();
+  if (controller == nullptr) {
+    Serial.println("No controller selected.");
+    return false;
+  }
+
+  switch (command) {
+    case CommandId::Help:
+      printHelp();
+      return true;
+    case CommandId::Status:
+      printStatus();
+      return true;
+    case CommandId::Exit:
+      enterReceiverMode();
+      printPrompt();
+      return true;
+    case CommandId::Light:
+      if (controller->profile == ControllerProfile::Qiachip) {
+        return sendQiachipLight(*controller);
+      }
+      return sendLight(*controller);
+    case CommandId::Temp:
+      if (controller->profile == ControllerProfile::Qiachip) {
+        Serial.println("Temp is not supported for profile qiachip.");
+        return false;
+      }
+      return sendTemp(*controller);
+    case CommandId::Fan:
+      if (controller->profile == ControllerProfile::Qiachip) {
+        return sendQiachipStop(*controller);
+      }
+      return sendFan(*controller);
+    case CommandId::Stop:
+      if (controller->profile == ControllerProfile::Qiachip) {
+        return sendQiachipStop(*controller);
+      }
+      Serial.println("Stop is only supported for profile qiachip.");
+      return false;
+    case CommandId::Reverse:
+      if (controller->profile == ControllerProfile::Qiachip) {
+        Serial.println("Reverse is not supported for profile qiachip.");
+        return false;
+      }
+      return sendReverse(*controller);
+    case CommandId::Beep:
+      if (controller->profile == ControllerProfile::Qiachip) {
+        Serial.println("Beep is not supported for profile qiachip.");
+        return false;
+      }
+      return sendBeep(*controller);
+    case CommandId::Pair: {
+      unsigned long duration = kDefaultPairBurstMs;
+      if (tokenCount >= 2) {
+        unsigned long seconds = 0;
+        if (!parseUnsigned(tokens[1], seconds) || seconds == 0) {
+          Serial.println("Pair: invalid time.");
+          return false;
+        }
+        duration = seconds * 1000UL;
+      }
+      return sendPairBurst(*controller, duration);
+    }
+    case CommandId::Speed: {
+      int speed = -1;
+      if (tokenCount >= 2) {
+        speed = atoi(tokens[1]);
+      }
+      if (controller->profile == ControllerProfile::Qiachip) {
+        return sendQiachipSpeed(*controller, static_cast<uint8_t>(speed));
+      }
+      return sendSpeed(*controller, static_cast<uint8_t>(speed));
+    }
+    case CommandId::Timer: {
+      if (controller->profile == ControllerProfile::Qiachip) {
+        if (tokenCount < 2) {
+          return sendQiachipTimer(*controller, false, 0);
+        }
+        unsigned long value = 0;
+        if (!parseUnsigned(tokens[1], value)) {
+          Serial.println("Timer: invalid value.");
+          return false;
+        }
+        return sendQiachipTimer(*controller, true, static_cast<uint8_t>(value));
+      }
+      if (controller->profile == ControllerProfile::Remote) {
+        if (tokenCount < 2) {
+          Serial.println("Timer without parameter is invalid for profile remote.");
+          return false;
+        }
+        unsigned long value = 0;
+        if (!parseUnsigned(tokens[1], value)) {
+          Serial.println("Timer: invalid value.");
+          return false;
+        }
+        return sendTimer(*controller, true, static_cast<uint8_t>(value));
+      }
+
+      if (tokenCount == 1) {
+        return sendTimer(*controller, false, 0);
+      }
+      unsigned long value = 0;
+      if (!parseUnsigned(tokens[1], value)) {
+        Serial.println("Timer: invalid value.");
+        return false;
+      }
+      return sendTimer(*controller, true, static_cast<uint8_t>(value));
+    }
+    case CommandId::Unknown:
+      Serial.println("Unknown command.");
+      return false;
+    case CommandId::Ambiguous:
+      Serial.println("Ambiguous command.");
+      return false;
+    default:
+      Serial.println("Command not available in controller mode.");
+      return false;
+  }
+}
+
+void printReceivedFrame(const DecodedFrame &decoded) {
   if (!decoded.checksumOk) {
     Serial.printf("RX 0x%08lX -> checksum invalid name=Invalid\n", static_cast<unsigned long>(decoded.raw));
     return;
   }
 
-  ProtocolMode profile = ProtocolMode::Manual;
-  if (!lookupPairedProfile(decoded.id, profile)) {
+  ControllerProfile profile;
+  if (!lookupControllerProfile(decoded.id, profile)) {
     Serial.printf("RX 0x%08lX Unknown name=Unknown\n", static_cast<unsigned long>(decoded.raw));
     return;
   }
 
-  if (profile == ProtocolMode::Wall) {
-    const char *commandName = wallCommandName(decoded.command);
-    Serial.printf("RX 0x%08lX wall   cmd=0x%02X cnt=0x%X name=%s\n",
+  if (profile == ControllerProfile::Wall) {
+    Serial.printf("RX 0x%08lX wall cmd=0x%X cnt=0x%X name=%s\n",
                   static_cast<unsigned long>(decoded.raw),
                   decoded.command,
                   decoded.x,
-                  commandName);
+                  kWallBeep == decoded.command      ? "Beep"
+                  : kWallReverseA == decoded.command ? "ReverseA"
+                  : kWallReverseB == decoded.command ? "ReverseB"
+                  : kWallLight == decoded.command    ? "Light"
+                  : kWallFan == decoded.command      ? "Fan"
+                  : kWallTimerOff == decoded.command ? "TimerOff"
+                  : kWallTimer1h == decoded.command  ? "Timer1h"
+                  : kWallTimer2h == decoded.command  ? "Timer2h"
+                  : kWallTimer4h == decoded.command  ? "Timer4h"
+                  : kWallTimer8h == decoded.command  ? "Timer8h"
+                                                     : "UnknownCmd");
     return;
   }
 
-  const char *commandName = manualFunctionName(decoded.manualFunction);
-  Serial.printf("RX 0x%08lX manual cmd=0x%02X cnt=0x%X name=%s\n",
+  if (profile == ControllerProfile::Qiachip) {
+    Serial.printf("RX 0x%08lX qiachip cmd=0x%X cnt=%u name=%s\n",
+                  static_cast<unsigned long>(decoded.raw),
+                  decoded.command,
+                  static_cast<unsigned int>(decoded.x & 0x07),
+                  decoded.command == kQiachipLight  ? "Light"
+                  : decoded.command == kQiachipSpeed1 ? "Speed1"
+                  : decoded.command == kQiachipSpeed2 ? "Speed2"
+                  : decoded.command == kQiachipSpeed3 ? "Speed3"
+                  : decoded.command == kQiachipStop   ? "Stop"
+                  : decoded.command == kQiachipTimer1 ? "Timer1"
+                  : decoded.command == kQiachipTimer2 ? "Timer2"
+                  : decoded.command == kQiachipTimer4 ? "Timer4"
+                  : decoded.command == kQiachipTimer8 ? "Timer8"
+                  : decoded.command == kQiachipPair   ? "Pair"
+                                                      : "UnknownCmd");
+    return;
+  }
+
+  Serial.printf("RX 0x%08lX remote fn=0x%02X cnt=%u name=%s\n",
                 static_cast<unsigned long>(decoded.raw),
                 decoded.manualFunction,
                 static_cast<unsigned int>(decoded.x & 0x07),
-                commandName);
+                kManualSpeed1 == decoded.manualFunction  ? "Speed1"
+                : kManualSpeed2 == decoded.manualFunction ? "Speed2"
+                : kManualSpeed3 == decoded.manualFunction ? "Speed3"
+                : kManualSpeed4 == decoded.manualFunction ? "Speed4"
+                : kManualSpeed5 == decoded.manualFunction ? "Speed5"
+                : kManualSpeed6 == decoded.manualFunction ? "Speed6"
+                : kManualLight == decoded.manualFunction  ? "Light"
+                : kManualFan == decoded.manualFunction    ? "Fan"
+                : kManualBeep == decoded.manualFunction   ? "Beep"
+                : kManualTemp == decoded.manualFunction   ? "Temp"
+                : kManualReverse == decoded.manualFunction ? "Reverse"
+                : kManualTimer1h == decoded.manualFunction ? "Timer1h"
+                : kManualTimer2h == decoded.manualFunction ? "Timer2h"
+                : kManualTimer4h == decoded.manualFunction ? "Timer4h"
+                                                          : "UnknownFn");
 }
 
-void processLine(char *line) {
+void handleControllerLine(char *line) {
   char *trimmed = trimWhitespace(line);
   if (trimmed == nullptr || *trimmed == '\0') {
     return;
   }
 
-  char *tokens[4] = {};
-  const size_t tokenCount = splitTokens(trimmed, tokens, 4);
+  if (clearConfirmState.active) {
+    clearConfirmState.active = false;
+    if (equalsIgnoreCase(trimmed, "y") || equalsIgnoreCase(trimmed, "yes")) {
+      resetControllerList();
+    } else {
+      Serial.println("Clear canceled.");
+    }
+    printPrompt();
+    return;
+  }
+
+  char *tokens[5] = {};
+  const size_t tokenCount = splitTokens(trimmed, tokens, 5);
   if (tokenCount == 0) {
     return;
   }
 
-  if (equalsIgnoreCase(tokens[0], "help")) {
-    printHelp();
+  const char *ambiguousCommands[8] = {};
+  size_t ambiguousCount = 0;
+  CommandId command = resolveCommand(tokens[0], ambiguousCommands, 8, &ambiguousCount);
+  if (command == CommandId::Unknown) {
+    Serial.printf("Unknown command: %s\n", tokens[0]);
+    printPrompt();
     return;
   }
-  if (equalsIgnoreCase(tokens[0], "status")) {
-    printStatus();
-    return;
-  }
-  if (equalsIgnoreCase(tokens[0], "wall") || equalsIgnoreCase(tokens[0], "manual") || equalsIgnoreCase(tokens[0], "receiver")) {
-    ProtocolMode mode;
-    if (parseMode(tokens[0], mode)) {
-      setMode(mode);
-    }
-    return;
-  }
-  if (equalsIgnoreCase(tokens[0], "id")) {
-    if (isReceiverMode()) {
-      Serial.println("Receiver mode does not use a remote ID.");
-      return;
-    }
-    uint32_t parsedId = 0;
-    if (tokenCount < 2 || !parseRemoteId(tokens[1], parsedId)) {
-      Serial.println("Usage: id 0x146CD");
-      return;
-    }
-    currentRemoteId() = parsedId;
-    Serial.printf("Remote ID for %s set to 0x%05lX, key=0x%X\n",
-                  modeName(currentMode),
-                  static_cast<unsigned long>(currentRemoteId()),
-                  keyFromId(currentRemoteId()));
-    return;
-  }
-  if (handleSpeedTokens(tokens, tokenCount)) {
-    return;
-  }
-  if (handleTimerTokens(tokens, tokenCount)) {
-    return;
-  }
-  if (equalsIgnoreCase(tokens[0], "Light")) {
-    sendCurrentModeCommand(kWallLightOnOff, kManualLightOnOff, "Light");
-    return;
-  }
-  if (equalsIgnoreCase(tokens[0], "Temp")) {
-    if (currentMode == ProtocolMode::Wall) {
-      Serial.println("Temp is only available in manual mode.");
-      return;
-    }
-    sendManualFunction(kManualTemp, "Temp", true);
-    return;
-  }
-  if (equalsIgnoreCase(tokens[0], "Fan")) {
-    sendCurrentModeCommand(kWallFanOnOff, kManualFanOnOff, "Fan");
-    return;
-  }
-  if (equalsIgnoreCase(tokens[0], "Reverse")) {
-    sendReverse();
-    return;
-  }
-  if (equalsIgnoreCase(tokens[0], "Beep")) {
-    sendCurrentModeCommand(kWallBeep, kManualBeep, "Beep");
-    return;
-  }
-  if (equalsIgnoreCase(tokens[0], "pair")) {
-    sendPair();
-    return;
-  }
-  if (equalsIgnoreCase(tokens[0], "reset")) {
-    resetPairedRemotes();
+  if (command == CommandId::Ambiguous) {
+    printAmbiguousCommand(tokens[0], ambiguousCommands, ambiguousCount);
+    printPrompt();
     return;
   }
 
-  Serial.printf("Unknown command: %s\n", tokens[0]);
+  const bool ok = appMode == AppMode::Receiver ? handleReceiverCommand(command, tokens, tokenCount)
+                                               : handleControllerCommand(command, tokens, tokenCount);
+  if (ok && command != CommandId::Exit && !(appMode == AppMode::Controller && command == CommandId::Use)) {
+    printPrompt();
+  }
 }
 
-void handleSerial() {
-  while (Serial.available() > 0) {
-    const char incoming = static_cast<char>(Serial.read());
-
-    if (incoming == '\r') {
-      continue;
-    }
-    if (incoming == '\n') {
-      serialLine[serialLineLength] = '\0';
-      processLine(serialLine);
-      serialLineLength = 0;
-      printPrompt();
-      continue;
-    }
-    if (serialLineLength >= (kMaxLineLength - 1)) {
-      serialLineLength = 0;
-      Serial.println("Input line too long.");
-      printPrompt();
-      continue;
-    }
-
-    serialLine[serialLineLength++] = incoming;
+void handleReceiverTimeout() {
+  if (!pairingState.active) {
+    return;
   }
+  checkPairingTimeout();
 }
 
 void handleReceiver() {
-  checkReceiverPairingTimeout();
+  handleReceiverTimeout();
 
   if (!radio.available()) {
     return;
@@ -1036,18 +1394,11 @@ void handleReceiver() {
     return;
   }
 
-  const bool duplicate = frame == lastRxFrame;
-  lastRxFrame = frame;
-
-  if (!isReceiverMode() && duplicate) {
-    return;
-  }
-
-  if (isReceiverMode()) {
-    const DecodedFrame decoded = decodeFrame(frame);
-    handleReceiverPairingFrame(decoded);
-    if (shouldDisplayReceiverFrame(frame)) {
-      printReceivedFrame(frame);
+  const DecodedFrame decoded = decodeFrame(frame);
+  if (appMode == AppMode::Receiver) {
+    const bool consumedByPairing = processPairingFrame(decoded);
+    if (!consumedByPairing && shouldDisplayFrame(frame)) {
+      printReceivedFrame(decoded);
     }
   }
 }
@@ -1058,19 +1409,18 @@ void setup() {
   Serial.begin(kSerialBaudRate);
   radio.enableTransmit(kTxPin);
   radio.enableReceive(digitalPinToInterrupt(kRxPin));
-  resetStates();
 
   preferencesReady = preferences.begin(kPrefsNamespace, false);
   if (preferencesReady) {
-    loadPairedRemotes();
+    loadControllers();
   }
 
   Serial.println();
   Serial.println("Switch-433 UART protocol bridge ready.");
   if (preferencesReady) {
-    Serial.printf("Receiver: loaded %u paired remote(s).\n", static_cast<unsigned int>(pairedRemoteCount));
+    Serial.printf("Loaded %u controller(s).\n", static_cast<unsigned int>(controllerCount));
   } else {
-    Serial.println("Receiver: preferences unavailable, paired list is volatile.");
+    Serial.println("Preferences unavailable, database is volatile.");
   }
   printHelp();
   printStatus();
@@ -1079,5 +1429,25 @@ void setup() {
 
 void loop() {
   handleReceiver();
-  handleSerial();
+
+  while (Serial.available() > 0) {
+    const char incoming = static_cast<char>(Serial.read());
+    if (incoming == '\r') {
+      continue;
+    }
+    if (incoming == '\n') {
+      serialLine[serialLineLength] = '\0';
+      handleControllerLine(serialLine);
+      serialLineLength = 0;
+      continue;
+    }
+    if (serialLineLength >= (kMaxLineLength - 1)) {
+      serialLineLength = 0;
+      Serial.println("Input line too long.");
+      printPrompt();
+      continue;
+    }
+    serialLine[serialLineLength++] = incoming;
+  }
 }
+
