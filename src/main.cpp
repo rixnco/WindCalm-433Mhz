@@ -6,20 +6,22 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifndef SWITCH_TX_PIN
-#define SWITCH_TX_PIN 27
-#endif
-
-#ifndef SWITCH_RX_PIN
-#define SWITCH_RX_PIN 34
-#endif
-
 namespace {
 
-constexpr uint8_t kTxPin = static_cast<uint8_t>(SWITCH_TX_PIN);
-constexpr uint8_t kRxPin = static_cast<uint8_t>(SWITCH_RX_PIN);
+#if defined(ARDUINO_ESP32S3_DEV)
+constexpr uint8_t kTxPin = 1;
+constexpr uint8_t kRxPin = 5;
+#elif defined(ARDUINO_ESP32_DEV)
+constexpr uint8_t kTxPin = 27;
+constexpr uint8_t kRxPin = 34;
+#else
+#error Unsupported board
+#endif
+
 constexpr unsigned long kSerialBaudRate = 115200;
 constexpr unsigned int kFrameBitLength = 32;
+constexpr uint8_t kDefaultTxProtocol = 1;
+constexpr uint16_t kDefaultTxDelayUs = 350;
 constexpr size_t kMaxLineLength = 96;
 constexpr size_t kMaxControllerCount = 24;
 constexpr unsigned long kDefaultPairTimeoutMs = 10000;
@@ -104,6 +106,7 @@ enum class CommandId : uint8_t {
   Timer,
   Reverse,
   Beep,
+  Radio,
   Pair,
 };
 
@@ -122,6 +125,25 @@ struct ManualData {
 struct ControllerData {
   WallData wall;
   ManualData manual;
+  uint8_t txProtocol = kDefaultTxProtocol;
+  uint16_t txDelayUs = kDefaultTxDelayUs;
+};
+
+struct WallDataV1 {
+  uint8_t counter = 0;
+  uint8_t timerIndex = 0;
+  uint8_t reverseUsesB = 0;
+};
+
+struct ManualDataV1 {
+  uint8_t counter = 0;
+  uint8_t reserved = 0;
+  uint8_t timerIndex = 0;
+};
+
+struct ControllerDataV1 {
+  WallDataV1 wall;
+  ManualDataV1 manual;
 };
 
 struct ControllerEntry {
@@ -134,6 +156,12 @@ struct StoredControllerEntry {
   uint32_t id;
   uint8_t profile;
   ControllerData data;
+};
+
+struct StoredControllerEntryV1 {
+  uint32_t id;
+  uint8_t profile;
+  ControllerDataV1 data;
 };
 
 struct DecodedFrame {
@@ -156,6 +184,9 @@ struct PairingState {
   ControllerProfile candidateProfile = ControllerProfile::Remote;
   unsigned long candidateSince = 0;
   unsigned long candidateLastSeen = 0;
+  uint32_t candidateDelaySum = 0;
+  uint16_t candidateDelaySamples = 0;
+  uint8_t candidateProtocol = 0;
 };
 
 struct ClearConfirmState {
@@ -440,7 +471,7 @@ bool hasController(uint32_t id) {
   return findControllerIndex(id) != static_cast<size_t>(-1);
 }
 
-bool addController(uint32_t id, ControllerProfile profile) {
+bool addController(uint32_t id, ControllerProfile profile, unsigned int txProtocol, unsigned int txDelayUs) {
   if (id == 0) {
     Serial.println("Add failed: invalid ID.");
     return false;
@@ -457,10 +488,20 @@ bool addController(uint32_t id, ControllerProfile profile) {
   controllers[controllerCount].id = id;
   controllers[controllerCount].profile = profile;
   controllers[controllerCount].data = {};
+  controllers[controllerCount].data.txProtocol = txProtocol == 0 ? kDefaultTxProtocol : static_cast<uint8_t>(txProtocol);
+  controllers[controllerCount].data.txDelayUs = txDelayUs == 0 ? kDefaultTxDelayUs : static_cast<uint16_t>(txDelayUs);
   ++controllerCount;
   saveControllers();
-  Serial.printf("Added 0x%05lX profile=%s.\n", static_cast<unsigned long>(id), profileName(profile));
+  Serial.printf("Added 0x%05lX profile=%s rf[proto=%u delay=%uus].\n",
+                static_cast<unsigned long>(id),
+                profileName(profile),
+                controllers[controllerCount - 1].data.txProtocol,
+                controllers[controllerCount - 1].data.txDelayUs);
   return true;
+}
+
+bool addController(uint32_t id, ControllerProfile profile) {
+  return addController(id, profile, kDefaultTxProtocol, kDefaultTxDelayUs);
 }
 
 bool removeController(uint32_t id) {
@@ -530,25 +571,77 @@ void loadControllers() {
     return;
   }
 
-  StoredControllerEntry stored[kMaxControllerCount] = {};
-  const size_t requestedBytes = storedCount * sizeof(StoredControllerEntry);
-  const size_t readBytes = preferences.getBytes(kPrefsDataKey, stored, requestedBytes);
-  const size_t readCount = readBytes / sizeof(StoredControllerEntry);
+  const size_t storedBytes = preferences.getBytesLength(kPrefsDataKey);
+  if (storedBytes == 0) {
+    return;
+  }
 
-  for (size_t index = 0; index < readCount && controllerCount < kMaxControllerCount; ++index) {
-    if (stored[index].id == 0) {
-      continue;
-    }
-    if (stored[index].profile != static_cast<uint8_t>(ControllerProfile::Wall) &&
-        stored[index].profile != static_cast<uint8_t>(ControllerProfile::Remote) &&
-        stored[index].profile != static_cast<uint8_t>(ControllerProfile::Qiachip)) {
-      continue;
+  if ((storedBytes % sizeof(StoredControllerEntry)) == 0) {
+    StoredControllerEntry stored[kMaxControllerCount] = {};
+    const size_t maxBytes = sizeof(stored);
+    const size_t requestedBytes = storedBytes < maxBytes ? storedBytes : maxBytes;
+    const size_t readBytes = preferences.getBytes(kPrefsDataKey, stored, requestedBytes);
+    size_t readCount = readBytes / sizeof(StoredControllerEntry);
+    if (readCount > storedCount) {
+      readCount = storedCount;
     }
 
-    controllers[controllerCount].id = stored[index].id;
-    controllers[controllerCount].profile = static_cast<ControllerProfile>(stored[index].profile);
-    controllers[controllerCount].data = stored[index].data;
-    ++controllerCount;
+    for (size_t index = 0; index < readCount && controllerCount < kMaxControllerCount; ++index) {
+      if (stored[index].id == 0) {
+        continue;
+      }
+      if (stored[index].profile != static_cast<uint8_t>(ControllerProfile::Wall) &&
+          stored[index].profile != static_cast<uint8_t>(ControllerProfile::Remote) &&
+          stored[index].profile != static_cast<uint8_t>(ControllerProfile::Qiachip)) {
+        continue;
+      }
+
+      controllers[controllerCount].id = stored[index].id;
+      controllers[controllerCount].profile = static_cast<ControllerProfile>(stored[index].profile);
+      controllers[controllerCount].data = stored[index].data;
+      if (controllers[controllerCount].data.txProtocol == 0) {
+        controllers[controllerCount].data.txProtocol = kDefaultTxProtocol;
+      }
+      if (controllers[controllerCount].data.txDelayUs == 0) {
+        controllers[controllerCount].data.txDelayUs = kDefaultTxDelayUs;
+      }
+      ++controllerCount;
+    }
+    return;
+  }
+
+  if ((storedBytes % sizeof(StoredControllerEntryV1)) == 0) {
+    StoredControllerEntryV1 stored[kMaxControllerCount] = {};
+    const size_t maxBytes = sizeof(stored);
+    const size_t requestedBytes = storedBytes < maxBytes ? storedBytes : maxBytes;
+    const size_t readBytes = preferences.getBytes(kPrefsDataKey, stored, requestedBytes);
+    size_t readCount = readBytes / sizeof(StoredControllerEntryV1);
+    if (readCount > storedCount) {
+      readCount = storedCount;
+    }
+
+    for (size_t index = 0; index < readCount && controllerCount < kMaxControllerCount; ++index) {
+      if (stored[index].id == 0) {
+        continue;
+      }
+      if (stored[index].profile != static_cast<uint8_t>(ControllerProfile::Wall) &&
+          stored[index].profile != static_cast<uint8_t>(ControllerProfile::Remote) &&
+          stored[index].profile != static_cast<uint8_t>(ControllerProfile::Qiachip)) {
+        continue;
+      }
+
+      controllers[controllerCount].id = stored[index].id;
+      controllers[controllerCount].profile = static_cast<ControllerProfile>(stored[index].profile);
+      controllers[controllerCount].data = {};
+      controllers[controllerCount].data.wall.counter = stored[index].data.wall.counter;
+      controllers[controllerCount].data.wall.timerIndex = stored[index].data.wall.timerIndex;
+      controllers[controllerCount].data.wall.reverseUsesB = stored[index].data.wall.reverseUsesB;
+      controllers[controllerCount].data.manual.counter = stored[index].data.manual.counter;
+      controllers[controllerCount].data.manual.timerIndex = stored[index].data.manual.timerIndex;
+      controllers[controllerCount].data.txProtocol = kDefaultTxProtocol;
+      controllers[controllerCount].data.txDelayUs = kDefaultTxDelayUs;
+      ++controllerCount;
+    }
   }
 }
 
@@ -570,7 +663,17 @@ bool shouldDisplayFrame(uint32_t frame) {
   return true;
 }
 
-bool sendFrame(uint32_t frame) {
+unsigned int txProtocolFor(const ControllerEntry &controller) {
+  return controller.data.txProtocol == 0 ? kDefaultTxProtocol : controller.data.txProtocol;
+}
+
+unsigned int txDelayUsFor(const ControllerEntry &controller) {
+  return controller.data.txDelayUs == 0 ? kDefaultTxDelayUs : controller.data.txDelayUs;
+}
+
+bool sendFrame(ControllerEntry &controller, uint32_t frame) {
+  radio.setProtocol(txProtocolFor(controller));
+  radio.setPulseLength(txDelayUsFor(controller));
   radio.send(frame, kFrameBitLength);
   return true;
 }
@@ -581,10 +684,12 @@ bool sendWallAction(ControllerEntry &controller, uint8_t command, const char *la
                          (static_cast<uint32_t>(command & 0x0F) << 8) |
                          (static_cast<uint32_t>(counter & 0x0F) << 4) |
                          static_cast<uint32_t>((counter ^ command ^ keyFromId(controller.id)) & 0x0F);
-  sendFrame(frame);
-  Serial.printf("TX %s id=0x%05lX profile=wall cmd=0x%X cnt=0x%X frame=0x%08lX\n",
+  sendFrame(controller, frame);
+  Serial.printf("TX %s id=0x%05lX profile=wall proto=%u delay=%uus cmd=0x%X cnt=0x%X frame=0x%08lX\n",
                 label,
                 static_cast<unsigned long>(controller.id),
+                txProtocolFor(controller),
+                txDelayUsFor(controller),
                 command,
                 counter,
                 static_cast<unsigned long>(frame));
@@ -604,10 +709,12 @@ bool sendManualAction(ControllerEntry &controller, uint8_t functionId, const cha
                          (static_cast<uint32_t>(command) << 8) |
                          (static_cast<uint32_t>(x) << 4) |
                          static_cast<uint32_t>((x ^ command ^ keyFromId(controller.id)) & 0x0F);
-  sendFrame(frame);
-  Serial.printf("TX %s id=0x%05lX profile=remote fn=0x%02X cnt=0x%X frame=0x%08lX\n",
+  sendFrame(controller, frame);
+  Serial.printf("TX %s id=0x%05lX profile=remote proto=%u delay=%uus fn=0x%02X cnt=0x%X frame=0x%08lX\n",
                 label,
                 static_cast<unsigned long>(controller.id),
+                txProtocolFor(controller),
+                txDelayUsFor(controller),
                 functionId,
                 counter,
                 static_cast<unsigned long>(frame));
@@ -801,6 +908,9 @@ void startPairing(unsigned long timeoutMs) {
   pairingState.candidateId = 0;
   pairingState.candidateSince = 0;
   pairingState.candidateLastSeen = 0;
+  pairingState.candidateDelaySum = 0;
+  pairingState.candidateDelaySamples = 0;
+  pairingState.candidateProtocol = 0;
   Serial.printf("Pair: listening for pairing for %lus.\n", timeoutMs / 1000UL);
 }
 
@@ -809,7 +919,7 @@ void finishPairingTimeout() {
   Serial.println("Pair: pairing timeout.");
 }
 
-bool processPairingFrame(const DecodedFrame &decoded) {
+bool processPairingFrame(const DecodedFrame &decoded, unsigned int receivedDelay, unsigned int receivedProtocol) {
   if (!pairingState.active) {
     return false;
   }
@@ -828,17 +938,38 @@ bool processPairingFrame(const DecodedFrame &decoded) {
     pairingState.candidateProfile = detectedProfile;
     pairingState.candidateSince = now;
     pairingState.candidateLastSeen = now;
-    Serial.printf("Pair: candidate profile=%s id=0x%05lX detected.\n", profileName(detectedProfile), static_cast<unsigned long>(decoded.id));
+    pairingState.candidateDelaySum = receivedDelay;
+    pairingState.candidateDelaySamples = 1;
+    pairingState.candidateProtocol = receivedProtocol == 0 ? kDefaultTxProtocol : static_cast<uint8_t>(receivedProtocol);
+    Serial.printf("Pair: candidate profile=%s id=0x%05lX detected (proto=%u delay=%uus).\n",
+                  profileName(detectedProfile),
+                  static_cast<unsigned long>(decoded.id),
+                  pairingState.candidateProtocol,
+                  receivedDelay);
     return true;
   }
 
   pairingState.candidateLastSeen = now;
+  if (pairingState.candidateDelaySamples < 0xFFFF) {
+    pairingState.candidateDelaySum += receivedDelay;
+    ++pairingState.candidateDelaySamples;
+  }
+  if (receivedProtocol != 0) {
+    pairingState.candidateProtocol = static_cast<uint8_t>(receivedProtocol);
+  }
   if ((now - pairingState.candidateSince) < kPairHoldMs) {
     return true;
   }
 
-  if (addController(decoded.id, detectedProfile)) {
-    Serial.println("Pair: success.");
+  const unsigned int protocol = pairingState.candidateProtocol == 0 ? kDefaultTxProtocol : pairingState.candidateProtocol;
+  const unsigned int avgDelayUs = pairingState.candidateDelaySamples == 0
+                                    ? kDefaultTxDelayUs
+                                    : static_cast<unsigned int>(pairingState.candidateDelaySum / pairingState.candidateDelaySamples);
+  if (addController(decoded.id, detectedProfile, protocol, avgDelayUs)) {
+    Serial.printf("Pair: success proto=%u avgDelay=%uus samples=%u.\n",
+                  protocol,
+                  avgDelayUs,
+                  pairingState.candidateDelaySamples);
   }
   pairingState.active = false;
   return true;
@@ -857,18 +988,22 @@ void printControllerData(const ControllerEntry &controller) {
   Serial.printf("id=0x%05lX profile=%s ", static_cast<unsigned long>(controller.id), profileName(controller.profile));
   const uint8_t key = keyFromId(controller.id);
   if (controller.profile == ControllerProfile::Wall) {
-    Serial.printf("data[wall counter=%u timer=%u reverseNext=%u key=0x%X]\n",
+    Serial.printf("data[wall counter=%u timer=%u reverseNext=%u key=0x%X rfProto=%u rfDelay=%uus]\n",
                   controller.data.wall.counter,
                   controller.data.wall.timerIndex,
                   controller.data.wall.reverseUsesB ? 2 : 1,
-                  key);
+                  key,
+                  txProtocolFor(controller),
+                  txDelayUsFor(controller));
     return;
   }
 
-  Serial.printf("data[remote counter=%u timer=%u key=0x%X]\n",
+  Serial.printf("data[remote counter=%u timer=%u key=0x%X rfProto=%u rfDelay=%uus]\n",
                 controller.data.manual.counter,
                 controller.data.manual.timerIndex,
-                key);
+                key,
+                txProtocolFor(controller),
+                txDelayUsFor(controller));
 }
 
 void printHelp() {
@@ -905,6 +1040,7 @@ void printHelp() {
       Serial.println("  Reverse");
       Serial.println("  Beep");
     }
+    Serial.println("  Rf [<protocol> <delay> | protocol <n> | delay <us>]");
     Serial.println("  Pair [<time>]");
     Serial.println("  Exit");
   }
@@ -993,7 +1129,8 @@ CommandId resolveCommand(const char *token, const char **ambiguousCommands, size
       {CommandId::Timer, {"timer", "tmr"}, 2, false, true},
       {CommandId::Reverse, {"reverse"}, 1, false, true},
       {CommandId::Beep, {"beep"}, 1, false, true},
-        {CommandId::Pair, {"pair"}, 1, true, true},
+      {CommandId::Radio, {"radio", "rf"}, 2, false, true},
+      {CommandId::Pair, {"pair"}, 1, true, true},
   };
 
   const ControllerEntry *controller = appMode == AppMode::Controller ? currentController() : nullptr;
@@ -1233,6 +1370,57 @@ bool handleControllerCommand(CommandId command, char **tokens, size_t tokenCount
       }
       return sendPairBurst(*controller, duration);
     }
+    case CommandId::Radio: {
+      if (tokenCount == 1) {
+        Serial.printf("RF: protocol=%u delay=%uus\n", txProtocolFor(*controller), txDelayUsFor(*controller));
+        return true;
+      }
+
+      if (tokenCount == 3 && isDigitsOnly(tokens[1]) && isDigitsOnly(tokens[2])) {
+        unsigned long protocol = 0;
+        unsigned long delayUs = 0;
+        if (!parseUnsigned(tokens[1], protocol) || protocol == 0 || protocol > 255) {
+          Serial.println("Rf: protocol must be in range 1..255.");
+          return false;
+        }
+        if (!parseUnsigned(tokens[2], delayUs) || delayUs == 0 || delayUs > 65535) {
+          Serial.println("Rf: delay must be in range 1..65535 us.");
+          return false;
+        }
+        controller->data.txProtocol = static_cast<uint8_t>(protocol);
+        controller->data.txDelayUs = static_cast<uint16_t>(delayUs);
+        saveControllers();
+        Serial.printf("RF updated: protocol=%u delay=%uus\n", txProtocolFor(*controller), txDelayUsFor(*controller));
+        return true;
+      }
+
+      if (tokenCount == 3 && (equalsIgnoreCase(tokens[1], "protocol") || equalsIgnoreCase(tokens[1], "proto"))) {
+        unsigned long protocol = 0;
+        if (!parseUnsigned(tokens[2], protocol) || protocol == 0 || protocol > 255) {
+          Serial.println("Rf: protocol must be in range 1..255.");
+          return false;
+        }
+        controller->data.txProtocol = static_cast<uint8_t>(protocol);
+        saveControllers();
+        Serial.printf("RF updated: protocol=%u delay=%uus\n", txProtocolFor(*controller), txDelayUsFor(*controller));
+        return true;
+      }
+
+      if (tokenCount == 3 && (equalsIgnoreCase(tokens[1], "delay") || equalsIgnoreCase(tokens[1], "pulse"))) {
+        unsigned long delayUs = 0;
+        if (!parseUnsigned(tokens[2], delayUs) || delayUs == 0 || delayUs > 65535) {
+          Serial.println("Rf: delay must be in range 1..65535 us.");
+          return false;
+        }
+        controller->data.txDelayUs = static_cast<uint16_t>(delayUs);
+        saveControllers();
+        Serial.printf("RF updated: protocol=%u delay=%uus\n", txProtocolFor(*controller), txDelayUsFor(*controller));
+        return true;
+      }
+
+      Serial.println("Rf: usage Rf [<protocol> <delay> | protocol <n> | delay <us>]");
+      return false;
+    }
     case CommandId::Speed: {
       int speed = -1;
       if (tokenCount >= 2) {
@@ -1290,21 +1478,35 @@ bool handleControllerCommand(CommandId command, char **tokens, size_t tokenCount
   }
 }
 
-void printReceivedFrame(const DecodedFrame &decoded) {
+void printReceivedFrame(const DecodedFrame &decoded,
+                        unsigned int receivedBitLength,
+                        unsigned int receivedDelay,
+                        unsigned int receivedProtocol) {
   if (!decoded.checksumOk) {
-    Serial.printf("RX 0x%08lX -> checksum invalid name=Invalid\n", static_cast<unsigned long>(decoded.raw));
+    Serial.printf("RX 0x%08lX bits=%u delay=%u proto=%u -> checksum invalid name=Invalid\n",
+                  static_cast<unsigned long>(decoded.raw),
+                  receivedBitLength,
+                  receivedDelay,
+                  receivedProtocol);
     return;
   }
 
   ControllerProfile profile;
   if (!lookupControllerProfile(decoded.id, profile)) {
-    Serial.printf("RX 0x%08lX Unknown name=Unknown\n", static_cast<unsigned long>(decoded.raw));
+    Serial.printf("RX 0x%08lX bits=%u delay=%u proto=%u Unknown name=Unknown\n",
+                  static_cast<unsigned long>(decoded.raw),
+                  receivedBitLength,
+                  receivedDelay,
+                  receivedProtocol);
     return;
   }
 
   if (profile == ControllerProfile::Wall) {
-    Serial.printf("RX 0x%08lX wall cmd=0x%X cnt=0x%X name=%s\n",
+    Serial.printf("RX 0x%08lX bits=%u delay=%u proto=%u wall cmd=0x%X cnt=0x%X name=%s\n",
                   static_cast<unsigned long>(decoded.raw),
+                  receivedBitLength,
+                  receivedDelay,
+                  receivedProtocol,
                   decoded.command,
                   decoded.x,
                   kWallBeep == decoded.command      ? "Beep"
@@ -1322,8 +1524,11 @@ void printReceivedFrame(const DecodedFrame &decoded) {
   }
 
   if (profile == ControllerProfile::Qiachip) {
-    Serial.printf("RX 0x%08lX qiachip cmd=0x%X cnt=%u name=%s\n",
+    Serial.printf("RX 0x%08lX bits=%u delay=%u proto=%u qiachip cmd=0x%X cnt=%u name=%s\n",
                   static_cast<unsigned long>(decoded.raw),
+                  receivedBitLength,
+                  receivedDelay,
+                  receivedProtocol,
                   decoded.command,
                   static_cast<unsigned int>(decoded.x & 0x07),
                   decoded.command == kQiachipLight  ? "Light"
@@ -1340,8 +1545,11 @@ void printReceivedFrame(const DecodedFrame &decoded) {
     return;
   }
 
-  Serial.printf("RX 0x%08lX remote fn=0x%02X cnt=%u name=%s\n",
+  Serial.printf("RX 0x%08lX bits=%u delay=%u proto=%u remote fn=0x%02X cnt=%u name=%s\n",
                 static_cast<unsigned long>(decoded.raw),
+                receivedBitLength,
+                receivedDelay,
+                receivedProtocol,
                 decoded.manualFunction,
                 static_cast<unsigned int>(decoded.x & 0x07),
                 kManualSpeed1 == decoded.manualFunction  ? "Speed1"
@@ -1421,6 +1629,8 @@ void handleReceiver() {
 
   const uint32_t frame = radio.getReceivedValue();
   const unsigned int bitLength = radio.getReceivedBitlength();
+  const unsigned int receivedDelay = radio.getReceivedDelay();
+  const unsigned int receivedProtocol = radio.getReceivedProtocol();
   radio.resetAvailable();
 
   if (bitLength != kFrameBitLength || frame == 0) {
@@ -1429,9 +1639,9 @@ void handleReceiver() {
 
   const DecodedFrame decoded = decodeFrame(frame);
   if (appMode == AppMode::Receiver) {
-    const bool consumedByPairing = processPairingFrame(decoded);
+    const bool consumedByPairing = processPairingFrame(decoded, receivedDelay, receivedProtocol);
     if (!consumedByPairing && shouldDisplayFrame(frame)) {
-      printReceivedFrame(decoded);
+      printReceivedFrame(decoded, bitLength, receivedDelay, receivedProtocol);
     }
   }
 }
