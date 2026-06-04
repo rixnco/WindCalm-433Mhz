@@ -3,6 +3,7 @@
 #include <RCSwitch.h>
 
 #include <ctype.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -21,7 +22,8 @@ constexpr uint8_t kRxPin = 34;
 constexpr unsigned long kSerialBaudRate = 115200;
 constexpr unsigned int kFrameBitLength = 32;
 constexpr uint8_t kDefaultTxProtocol = 1;
-constexpr uint16_t kDefaultTxDelayUs = 350;
+constexpr uint16_t kDefaultTxDelayUs = 665;
+constexpr size_t kMaxControllerNameLength = 16;
 constexpr size_t kMaxLineLength = 96;
 constexpr size_t kMaxControllerCount = 24;
 constexpr unsigned long kDefaultPairTimeoutMs = 10000;
@@ -107,6 +109,7 @@ enum class CommandId : uint8_t {
   Reverse,
   Beep,
   Radio,
+  Name,
   Pair,
 };
 
@@ -150,9 +153,17 @@ struct ControllerEntry {
   uint32_t id = 0;
   ControllerProfile profile = ControllerProfile::Remote;
   ControllerData data;
+  char name[kMaxControllerNameLength + 1] = {};
 };
 
 struct StoredControllerEntry {
+  uint32_t id;
+  uint8_t profile;
+  ControllerData data;
+  char name[kMaxControllerNameLength + 1];
+};
+
+struct StoredControllerEntryV2 {
   uint32_t id;
   uint8_t profile;
   ControllerData data;
@@ -399,6 +410,25 @@ bool parseControllerIndex(const char *text, size_t &index) {
   return true;
 }
 
+void setDefaultControllerName(ControllerEntry &controller) {
+  snprintf(controller.name, sizeof(controller.name), "0x%05lX", static_cast<unsigned long>(controller.id));
+}
+
+bool assignControllerName(ControllerEntry &controller, const char *name) {
+  if (name == nullptr) {
+    return false;
+  }
+
+  const size_t length = strlen(name);
+  if (length == 0 || length > kMaxControllerNameLength) {
+    return false;
+  }
+
+  memcpy(controller.name, name, length);
+  controller.name[length] = '\0';
+  return true;
+}
+
 uint8_t keyFromId(uint32_t id) {
   uint8_t key = 0x0A;
   for (uint8_t index = 0; index < 5; ++index) {
@@ -490,10 +520,12 @@ bool addController(uint32_t id, ControllerProfile profile, unsigned int txProtoc
   controllers[controllerCount].data = {};
   controllers[controllerCount].data.txProtocol = txProtocol == 0 ? kDefaultTxProtocol : static_cast<uint8_t>(txProtocol);
   controllers[controllerCount].data.txDelayUs = txDelayUs == 0 ? kDefaultTxDelayUs : static_cast<uint16_t>(txDelayUs);
+  setDefaultControllerName(controllers[controllerCount]);
   ++controllerCount;
   saveControllers();
-  Serial.printf("Added 0x%05lX profile=%s rf[proto=%u delay=%uus].\n",
+  Serial.printf("Added 0x%05lX name=%s profile=%s rf[proto=%u delay=%uus].\n",
                 static_cast<unsigned long>(id),
+                controllers[controllerCount - 1].name,
                 profileName(profile),
                 controllers[controllerCount - 1].data.txProtocol,
                 controllers[controllerCount - 1].data.txDelayUs);
@@ -555,6 +587,7 @@ void saveControllers() {
     stored[index].id = controllers[index].id;
     stored[index].profile = static_cast<uint8_t>(controllers[index].profile);
     stored[index].data = controllers[index].data;
+    memcpy(stored[index].name, controllers[index].name, sizeof(stored[index].name));
   }
   preferences.putBytes(kPrefsDataKey, stored, controllerCount * sizeof(StoredControllerEntry));
 }
@@ -576,7 +609,7 @@ void loadControllers() {
     return;
   }
 
-  if ((storedBytes % sizeof(StoredControllerEntry)) == 0) {
+  if (storedBytes == (storedCount * sizeof(StoredControllerEntry))) {
     StoredControllerEntry stored[kMaxControllerCount] = {};
     const size_t maxBytes = sizeof(stored);
     const size_t requestedBytes = storedBytes < maxBytes ? storedBytes : maxBytes;
@@ -599,6 +632,11 @@ void loadControllers() {
       controllers[controllerCount].id = stored[index].id;
       controllers[controllerCount].profile = static_cast<ControllerProfile>(stored[index].profile);
       controllers[controllerCount].data = stored[index].data;
+      memcpy(controllers[controllerCount].name, stored[index].name, sizeof(controllers[controllerCount].name));
+      controllers[controllerCount].name[kMaxControllerNameLength] = '\0';
+      if (controllers[controllerCount].name[0] == '\0') {
+        setDefaultControllerName(controllers[controllerCount]);
+      }
       if (controllers[controllerCount].data.txProtocol == 0) {
         controllers[controllerCount].data.txProtocol = kDefaultTxProtocol;
       }
@@ -610,7 +648,42 @@ void loadControllers() {
     return;
   }
 
-  if ((storedBytes % sizeof(StoredControllerEntryV1)) == 0) {
+  if (storedBytes == (storedCount * sizeof(StoredControllerEntryV2))) {
+    StoredControllerEntryV2 stored[kMaxControllerCount] = {};
+    const size_t maxBytes = sizeof(stored);
+    const size_t requestedBytes = storedBytes < maxBytes ? storedBytes : maxBytes;
+    const size_t readBytes = preferences.getBytes(kPrefsDataKey, stored, requestedBytes);
+    size_t readCount = readBytes / sizeof(StoredControllerEntryV2);
+    if (readCount > storedCount) {
+      readCount = storedCount;
+    }
+
+    for (size_t index = 0; index < readCount && controllerCount < kMaxControllerCount; ++index) {
+      if (stored[index].id == 0) {
+        continue;
+      }
+      if (stored[index].profile != static_cast<uint8_t>(ControllerProfile::Wall) &&
+          stored[index].profile != static_cast<uint8_t>(ControllerProfile::Remote) &&
+          stored[index].profile != static_cast<uint8_t>(ControllerProfile::Qiachip)) {
+        continue;
+      }
+
+      controllers[controllerCount].id = stored[index].id;
+      controllers[controllerCount].profile = static_cast<ControllerProfile>(stored[index].profile);
+      controllers[controllerCount].data = stored[index].data;
+      setDefaultControllerName(controllers[controllerCount]);
+      if (controllers[controllerCount].data.txProtocol == 0) {
+        controllers[controllerCount].data.txProtocol = kDefaultTxProtocol;
+      }
+      if (controllers[controllerCount].data.txDelayUs == 0) {
+        controllers[controllerCount].data.txDelayUs = kDefaultTxDelayUs;
+      }
+      ++controllerCount;
+    }
+    return;
+  }
+
+  if (storedBytes == (storedCount * sizeof(StoredControllerEntryV1))) {
     StoredControllerEntryV1 stored[kMaxControllerCount] = {};
     const size_t maxBytes = sizeof(stored);
     const size_t requestedBytes = storedBytes < maxBytes ? storedBytes : maxBytes;
@@ -640,6 +713,7 @@ void loadControllers() {
       controllers[controllerCount].data.manual.timerIndex = stored[index].data.manual.timerIndex;
       controllers[controllerCount].data.txProtocol = kDefaultTxProtocol;
       controllers[controllerCount].data.txDelayUs = kDefaultTxDelayUs;
+      setDefaultControllerName(controllers[controllerCount]);
       ++controllerCount;
     }
   }
@@ -985,7 +1059,10 @@ void checkPairingTimeout() {
 }
 
 void printControllerData(const ControllerEntry &controller) {
-  Serial.printf("id=0x%05lX profile=%s ", static_cast<unsigned long>(controller.id), profileName(controller.profile));
+  Serial.printf("id=0x%05lX name=%s profile=%s ",
+                static_cast<unsigned long>(controller.id),
+                controller.name,
+                profileName(controller.profile));
   const uint8_t key = keyFromId(controller.id);
   if (controller.profile == ControllerProfile::Wall) {
     Serial.printf("data[wall counter=%u timer=%u reverseNext=%u key=0x%X rfProto=%u rfDelay=%uus]\n",
@@ -1009,11 +1086,11 @@ void printControllerData(const ControllerEntry &controller) {
 void printHelp() {
   Serial.println("Commands:");
   if (appMode == AppMode::Receiver) {
-    Serial.println("  Pair [<ID> <profile> | <time>]");
-    Serial.println("  Remove <ID|index> | rm <ID|index>");
-    Serial.println("  List | ls");
-    Serial.println("  Clear [-f]");
+    Serial.println("  Pair [<time> | <ID> <profile> [<protocol> <delay>]]");
     Serial.println("  Use <ID|index>");
+    Serial.println("  List | ls");
+    Serial.println("  Remove <ID|index> | rm <ID|index>");
+    Serial.println("  Clear [-f]");
   } else {
     const ControllerEntry *controller = currentController();
     const bool isControllerProfile = controller != nullptr && controller->profile == ControllerProfile::Remote;
@@ -1040,35 +1117,27 @@ void printHelp() {
       Serial.println("  Reverse");
       Serial.println("  Beep");
     }
+    Serial.println("  Name [<newName>] (max 16)");
     Serial.println("  Rf [<protocol> <delay> | protocol <n> | delay <us>]");
     Serial.println("  Pair [<time>]");
     Serial.println("  Exit");
+    Serial.println("  Status");
   }
   Serial.println("  Help | ?");
-  Serial.println("  Status");
 }
 
 void printStatus() {
-  if (appMode == AppMode::Receiver) {
-    Serial.printf("mode=receiver controllers=%u pairing=%s\n",
-                  static_cast<unsigned int>(controllerCount),
-                  pairingState.active ? "on" : "off");
-    for (size_t index = 0; index < controllerCount; ++index) {
-      Serial.printf("  [%u] id=0x%05lX profile=%s\n",
-                    static_cast<unsigned int>(index),
-                    static_cast<unsigned long>(controllers[index].id),
-                    profileName(controllers[index].profile));
+  if (appMode == AppMode::Controller) {
+    const ControllerEntry *controller = currentController();
+    if (controller == nullptr) {
+      Serial.println("mode=controller (no selected controller)");
+      return;
     }
+
+    printControllerData(*controller);
     return;
   }
 
-  const ControllerEntry *controller = currentController();
-  if (controller == nullptr) {
-    Serial.println("mode=controller (no selected controller)");
-    return;
-  }
-
-  printControllerData(*controller);
 }
 
 void printPrompt() {
@@ -1115,7 +1184,7 @@ CommandId resolveCommand(const char *token, const char **ambiguousCommands, size
 
   static const CommandSpec specs[] = {
       {CommandId::Help, {"help", "?"}, 2, true, true},
-      {CommandId::Status, {"status"}, 1, true, true},
+      {CommandId::Status, {"status"}, 1, false, true},
       {CommandId::Remove, {"remove", "rm"}, 2, true, false},
       {CommandId::List, {"list", "ls"}, 2, true, false},
       {CommandId::Clear, {"clear"}, 1, true, false},
@@ -1129,6 +1198,7 @@ CommandId resolveCommand(const char *token, const char **ambiguousCommands, size
       {CommandId::Timer, {"timer", "tmr"}, 2, false, true},
       {CommandId::Reverse, {"reverse"}, 1, false, true},
       {CommandId::Beep, {"beep"}, 1, false, true},
+        {CommandId::Name, {"name", "rename"}, 2, false, true},
       {CommandId::Radio, {"radio", "rf"}, 2, false, true},
       {CommandId::Pair, {"pair"}, 1, true, true},
   };
@@ -1213,10 +1283,31 @@ bool handleReceiverPair(char **tokens, size_t tokenCount) {
     uint32_t id = 0;
     ControllerProfile profile = ControllerProfile::Remote;
     if (!parseControllerId(tokens[1], id) || !parseProfile(tokens[2], profile)) {
-      Serial.println("Pair: usage Pair <ID> <profile> | Pair <time>");
+      Serial.println("Pair: usage Pair <ID> <profile> [<protocol> <delay>] | Pair <time>");
       return false;
     }
-    return addController(id, profile);
+
+    if (tokenCount == 3) {
+      return addController(id, profile);
+    }
+
+    if (tokenCount != 5) {
+      Serial.println("Pair: usage Pair <ID> <profile> [<protocol> <delay>] | Pair <time>");
+      return false;
+    }
+
+    unsigned long protocol = 0;
+    unsigned long delayUs = 0;
+    if (!parseUnsigned(tokens[3], protocol) || protocol == 0 || protocol > 255) {
+      Serial.println("Pair: invalid protocol.");
+      return false;
+    }
+    if (!parseUnsigned(tokens[4], delayUs) || delayUs == 0 || delayUs > 65535) {
+      Serial.println("Pair: invalid delay.");
+      return false;
+    }
+
+    return addController(id, profile, protocol, delayUs);
   }
 
   return false;
@@ -1226,9 +1317,6 @@ bool handleReceiverCommand(CommandId command, char **tokens, size_t tokenCount) 
   switch (command) {
     case CommandId::Help:
       printHelp();
-      return true;
-    case CommandId::Status:
-      printStatus();
       return true;
     case CommandId::Pair:
       return handleReceiverPair(tokens, tokenCount);
@@ -1253,10 +1341,11 @@ bool handleReceiverCommand(CommandId command, char **tokens, size_t tokenCount) 
     }
     case CommandId::List:
       for (size_t index = 0; index < controllerCount; ++index) {
-        Serial.printf("[%u] 0x%05lX %s\n",
+        Serial.printf("[%u] 0x%05lX profile=%-8s name=%s\n",
                       static_cast<unsigned int>(index),
                       static_cast<unsigned long>(controllers[index].id),
-                      profileName(controllers[index].profile));
+                      profileName(controllers[index].profile),
+                      controllers[index].name);
       }
       return true;
     case CommandId::Clear:
@@ -1358,6 +1447,26 @@ bool handleControllerCommand(CommandId command, char **tokens, size_t tokenCount
         return false;
       }
       return sendBeep(*controller);
+    case CommandId::Name: {
+      if (tokenCount == 1) {
+        Serial.printf("Name: %s\n", controller->name);
+        return true;
+      }
+
+      if (tokenCount != 2) {
+        Serial.println("Name: usage Name <newName> (max 16, no spaces)");
+        return false;
+      }
+
+      if (!assignControllerName(*controller, tokens[1])) {
+        Serial.println("Name: invalid value (1..16 chars, no spaces).");
+        return false;
+      }
+
+      saveControllers();
+      Serial.printf("Name updated: %s\n", controller->name);
+      return true;
+    }
     case CommandId::Pair: {
       unsigned long duration = kDefaultPairBurstMs;
       if (tokenCount >= 2) {
@@ -1666,7 +1775,6 @@ void setup() {
     Serial.println("Preferences unavailable, database is volatile.");
   }
   printHelp();
-  printStatus();
   printPrompt();
 }
 
