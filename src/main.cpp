@@ -25,6 +25,7 @@ constexpr uint8_t kDefaultTxProtocol = 1;
 constexpr uint16_t kDefaultTxDelayUs = 665;
 constexpr size_t kMaxControllerNameLength = 16;
 constexpr size_t kMaxLineLength = 96;
+constexpr size_t kHistoryDepth = 16;
 constexpr size_t kMaxControllerCount = 24;
 constexpr unsigned long kDefaultPairTimeoutMs = 10000;
 constexpr unsigned long kPairHoldMs = 2000;
@@ -51,20 +52,21 @@ constexpr uint8_t kWallTimer4h = 0xD;
 constexpr uint8_t kWallTimer8h = 0xE;
 constexpr uint8_t kWallFan = 0xF;
 
-constexpr uint8_t kManualSpeed1 = 0x02;
-constexpr uint8_t kManualSpeed4 = 0x03;
-constexpr uint8_t kManualBeep = 0x04;
-constexpr uint8_t kManualFan = 0x05;
-constexpr uint8_t kManualSpeed3 = 0x06;
-constexpr uint8_t kManualSpeed2 = 0x08;
-constexpr uint8_t kManualLight = 0x09;
-constexpr uint8_t kManualTemp = 0x0E;
-constexpr uint8_t kManualTimer4h = 0x11;
-constexpr uint8_t kManualSpeed5 = 0x14;
-constexpr uint8_t kManualTimer2h = 0x17;
-constexpr uint8_t kManualReverse = 0x18;
-constexpr uint8_t kManualSpeed6 = 0x1A;
-constexpr uint8_t kManualTimer1h = 0x1B;
+constexpr uint8_t kRemoteSpeed1 = 0x02;
+constexpr uint8_t kRemoteSpeed4 = 0x03;
+constexpr uint8_t kRemoteBeep = 0x04;
+constexpr uint8_t kRemoteFan = 0x05;
+constexpr uint8_t kRemoteSpeed3 = 0x06;
+constexpr uint8_t kRemoteSpeed2 = 0x08;
+constexpr uint8_t kRemoteLight = 0x09;
+constexpr uint8_t kRemoteTemp = 0x0E;
+constexpr uint8_t kRemoteTimer4h = 0x11;
+constexpr uint8_t kRemoteSpeed5 = 0x14;
+constexpr uint8_t kRemoteTimer2h = 0x17;
+constexpr uint8_t kRemoteReverse = 0x18;
+constexpr uint8_t kRemoteSpeed6 = 0x1A;
+constexpr uint8_t kRemoteTimer1h = 0x1B;
+
 constexpr uint8_t kQiachipPair = 0x0F;
 constexpr uint8_t kQiachipLight = 0x08;
 constexpr uint8_t kQiachipSpeed3 = 0x09;
@@ -77,7 +79,7 @@ constexpr uint8_t kQiachipTimer4 = 0x05;
 constexpr uint8_t kQiachipTimer8 = 0x0A;
 
 constexpr uint8_t kWallTimerCycle[] = {kWallTimer1h, kWallTimer2h, kWallTimer4h, kWallTimer8h, kWallTimerOff};
-constexpr uint8_t kManualTimerCycle[] = {kManualTimer1h, kManualTimer2h, kManualTimer4h};
+constexpr uint8_t kRemoteTimerCycle[] = {kRemoteTimer1h, kRemoteTimer2h, kRemoteTimer4h};
 
 enum class ControllerProfile : uint8_t {
   Wall = 0,
@@ -88,12 +90,15 @@ enum class ControllerProfile : uint8_t {
 enum class AppMode : uint8_t {
   Receiver = 0,
   Controller = 1,
+  Sniffer = 2,
 };
 
 enum class CommandId : uint8_t {
   Unknown = 0,
   Ambiguous,
   Help,
+  Vt100,
+  SerialMode,
   Status,
   Remove,
   List,
@@ -110,7 +115,10 @@ enum class CommandId : uint8_t {
   Beep,
   Radio,
   Name,
+  Sniffer,
+  Verbose,
   Pair,
+  Custom,
 };
 
 struct WallData {
@@ -119,7 +127,7 @@ struct WallData {
   uint8_t reverseUsesB = 0;
 };
 
-struct ManualData {
+struct RemoteData {
   uint8_t counter = 0;
   uint8_t reserved = 0;
   uint8_t timerIndex = 0;
@@ -127,26 +135,9 @@ struct ManualData {
 
 struct ControllerData {
   WallData wall;
-  ManualData manual;
+  RemoteData remote;
   uint8_t txProtocol = kDefaultTxProtocol;
   uint16_t txDelayUs = kDefaultTxDelayUs;
-};
-
-struct WallDataV1 {
-  uint8_t counter = 0;
-  uint8_t timerIndex = 0;
-  uint8_t reverseUsesB = 0;
-};
-
-struct ManualDataV1 {
-  uint8_t counter = 0;
-  uint8_t reserved = 0;
-  uint8_t timerIndex = 0;
-};
-
-struct ControllerDataV1 {
-  WallDataV1 wall;
-  ManualDataV1 manual;
 };
 
 struct ControllerEntry {
@@ -160,19 +151,6 @@ struct StoredControllerEntry {
   uint32_t id;
   uint8_t profile;
   ControllerData data;
-  char name[kMaxControllerNameLength + 1];
-};
-
-struct StoredControllerEntryV2 {
-  uint32_t id;
-  uint8_t profile;
-  ControllerData data;
-};
-
-struct StoredControllerEntryV1 {
-  uint32_t id;
-  uint8_t profile;
-  ControllerDataV1 data;
 };
 
 struct DecodedFrame {
@@ -183,7 +161,7 @@ struct DecodedFrame {
   uint8_t y = 0;
   uint8_t key = 0;
   uint8_t page = 0;
-  uint8_t manualFunction = 0;
+  uint8_t remoteFunction = 0;
   bool checksumOk = false;
 };
 
@@ -210,6 +188,7 @@ struct CommandSpec {
   size_t keywordCount;
   bool receiverAllowed;
   bool controllerAllowed;
+  bool snifferAllowed;
 };
 
 RCSwitch radio;
@@ -221,6 +200,22 @@ ControllerEntry controllers[kMaxControllerCount];
 size_t controllerCount = 0;
 char serialLine[kMaxLineLength] = {};
 size_t serialLineLength = 0;
+char lineBuffer[kMaxLineLength] = {};
+size_t lineLength = 0;
+size_t lineCursor = 0;
+char lineDraft[kMaxLineLength] = {};
+size_t lineDraftLength = 0;
+int historyNavIndex = -1;
+char commandHistory[kHistoryDepth][kMaxLineLength] = {};
+size_t commandHistoryHead = 0;
+size_t commandHistoryCount = 0;
+uint8_t escapeState = 0;
+char escapeBuffer[8] = {};
+size_t escapeBufferLength = 0;
+bool vt100Mode = false;
+bool ignoreNextLf = false;
+bool pendingUtf8LeadC2 = false;
+bool snifferVerbose = false;
 uint32_t lastDisplayedFrame = 0;
 bool lastDisplayedFrameValid = false;
 PairingState pairingState;
@@ -228,6 +223,332 @@ ClearConfirmState clearConfirmState;
 
 void saveControllers();
 void printPrompt();
+size_t findControllerIndex(uint32_t id);
+const ControllerEntry *currentController();
+void handleControllerLine(char *line);
+
+void buildPrompt(char *out, size_t capacity) {
+  if (capacity == 0) {
+    return;
+  }
+
+  if (appMode == AppMode::Controller) {
+    const ControllerEntry *controller = currentController();
+    if (controller != nullptr) {
+      snprintf(out, capacity, "0x%05lX> ", static_cast<unsigned long>(controller->id));
+      return;
+    }
+  }
+  if (appMode == AppMode::Sniffer) {
+    strncpy(out, "sniffer> ", capacity - 1);
+    out[capacity - 1] = '\0';
+    return;
+  }
+
+  strncpy(out, "> ", capacity - 1);
+  out[capacity - 1] = '\0';
+}
+
+void renderEditLine() {
+  if (!vt100Mode) {
+    return;
+  }
+  char prompt[24] = {};
+  buildPrompt(prompt, sizeof(prompt));
+  Serial.print("\033[2K\033[1G");
+  Serial.print(prompt);
+  Serial.print(lineBuffer);
+  Serial.print("\033[K");
+  Serial.print("\033[1G");
+  Serial.printf("\033[%uC", static_cast<unsigned int>(strlen(prompt) + lineCursor));
+}
+
+void clearEditLine() {
+  lineBuffer[0] = '\0';
+  lineLength = 0;
+  lineCursor = 0;
+  lineDraft[0] = '\0';
+  lineDraftLength = 0;
+  historyNavIndex = -1;
+  escapeState = 0;
+  escapeBufferLength = 0;
+}
+
+void setVt100Mode(bool enabled) {
+  if (vt100Mode == enabled) {
+    Serial.printf("Terminal already in %s mode.\n", enabled ? "VT100" : "Serial");
+    return;
+  }
+
+  vt100Mode = enabled;
+  clearEditLine();
+  Serial.printf("Terminal mode: %s\n", enabled ? "VT100" : "Serial");
+}
+
+void pushHistory(const char *command) {
+  if (command == nullptr || *command == '\0') {
+    return;
+  }
+
+  if (commandHistoryCount > 0) {
+    const size_t lastIndex = (commandHistoryHead + kHistoryDepth - 1) % kHistoryDepth;
+    if (strcmp(commandHistory[lastIndex], command) == 0) {
+      return;
+    }
+  }
+
+  strncpy(commandHistory[commandHistoryHead], command, kMaxLineLength - 1);
+  commandHistory[commandHistoryHead][kMaxLineLength - 1] = '\0';
+  commandHistoryHead = (commandHistoryHead + 1) % kHistoryDepth;
+  if (commandHistoryCount < kHistoryDepth) {
+    ++commandHistoryCount;
+  }
+}
+
+void loadHistoryEntry(size_t navIndex) {
+  const size_t index = (commandHistoryHead + kHistoryDepth - 1 - navIndex) % kHistoryDepth;
+  strncpy(lineBuffer, commandHistory[index], kMaxLineLength - 1);
+  lineBuffer[kMaxLineLength - 1] = '\0';
+  lineLength = strlen(lineBuffer);
+  lineCursor = lineLength;
+}
+
+void historyUp() {
+  if (commandHistoryCount == 0) {
+    return;
+  }
+  if (historyNavIndex < 0) {
+    strncpy(lineDraft, lineBuffer, kMaxLineLength - 1);
+    lineDraft[kMaxLineLength - 1] = '\0';
+    lineDraftLength = lineLength;
+    historyNavIndex = 0;
+  } else if (static_cast<size_t>(historyNavIndex + 1) < commandHistoryCount) {
+    ++historyNavIndex;
+  }
+  loadHistoryEntry(static_cast<size_t>(historyNavIndex));
+}
+
+void historyDown() {
+  if (historyNavIndex < 0) {
+    return;
+  }
+  if (historyNavIndex == 0) {
+    strncpy(lineBuffer, lineDraft, kMaxLineLength - 1);
+    lineBuffer[kMaxLineLength - 1] = '\0';
+    lineLength = lineDraftLength;
+    lineCursor = lineLength;
+    historyNavIndex = -1;
+    return;
+  }
+
+  --historyNavIndex;
+  loadHistoryEntry(static_cast<size_t>(historyNavIndex));
+}
+
+void deleteAtCursor() {
+  if (lineCursor >= lineLength) {
+    return;
+  }
+  memmove(&lineBuffer[lineCursor], &lineBuffer[lineCursor + 1], lineLength - lineCursor);
+  --lineLength;
+}
+
+void backspaceAtCursor() {
+  if (lineCursor == 0) {
+    return;
+  }
+  memmove(&lineBuffer[lineCursor - 1], &lineBuffer[lineCursor], lineLength - lineCursor + 1);
+  --lineCursor;
+  --lineLength;
+}
+
+void insertAtCursor(char c) {
+  if (lineLength >= (kMaxLineLength - 1)) {
+    return;
+  }
+  if (lineCursor < lineLength) {
+    memmove(&lineBuffer[lineCursor + 1], &lineBuffer[lineCursor], lineLength - lineCursor + 1);
+  }
+  lineBuffer[lineCursor++] = c;
+  ++lineLength;
+  lineBuffer[lineLength] = '\0';
+}
+
+void processEscapeSequence(char finalChar) {
+  int value = 0;
+  if (escapeBufferLength > 0) {
+    value = atoi(escapeBuffer);
+  }
+
+  if (finalChar == 'A') {
+    historyUp();
+    return;
+  }
+  if (finalChar == 'B') {
+    historyDown();
+    return;
+  }
+  if (finalChar == 'C') {
+    if (lineCursor < lineLength) {
+      ++lineCursor;
+    }
+    return;
+  }
+  if (finalChar == 'D') {
+    if (lineCursor > 0) {
+      --lineCursor;
+    }
+    return;
+  }
+  if (finalChar == 'H' || value == 1 || value == 7) {
+    lineCursor = 0;
+    return;
+  }
+  if (finalChar == 'F' || value == 4 || value == 8) {
+    lineCursor = lineLength;
+    return;
+  }
+  if (finalChar == '~' && value == 3) {
+    deleteAtCursor();
+  }
+}
+
+void submitCurrentLine() {
+  Serial.print("\r\n");
+  lineBuffer[lineLength] = '\0';
+  if (lineLength == 0) {
+    printPrompt();
+    return;
+  }
+
+  pushHistory(lineBuffer);
+  handleControllerLine(lineBuffer);
+  clearEditLine();
+}
+
+void processSerialInputChar(char incoming) {
+  const uint8_t byte = static_cast<uint8_t>(incoming);
+
+  if (pendingUtf8LeadC2) {
+    pendingUtf8LeadC2 = false;
+    if (byte == 0xB2) {
+      setVt100Mode(!vt100Mode);
+      printPrompt();
+      return;
+    }
+  }
+
+  if (byte == 0xC2) {
+    pendingUtf8LeadC2 = true;
+    return;
+  }
+
+  if (byte == 0xB2) {
+    setVt100Mode(!vt100Mode);
+    printPrompt();
+    return;
+  }
+
+  if (ignoreNextLf) {
+    ignoreNextLf = false;
+    if (incoming == '\n') {
+      return;
+    }
+  }
+
+  if (!vt100Mode) {
+    if (escapeState == 1) {
+      if (incoming == '[') {
+        escapeState = 2;
+      } else {
+        escapeState = 0;
+      }
+      return;
+    }
+
+    if (escapeState == 2) {
+      escapeState = 0;
+      return;
+    }
+
+    if (incoming == '\033') {
+      escapeState = 1;
+      return;
+    }
+    if (incoming == '\r' || incoming == '\n') {
+      submitCurrentLine();
+      ignoreNextLf = incoming == '\r';
+      return;
+    }
+    if (incoming == 0x08 || incoming == 0x7F) {
+      if (lineLength > 0) {
+        --lineLength;
+        lineCursor = lineLength;
+        lineBuffer[lineLength] = '\0';
+        Serial.print("\b \b");
+      }
+      return;
+    }
+    if (incoming < 0x20 || incoming > 0x7E) {
+      return;
+    }
+    if (lineLength >= (kMaxLineLength - 1)) {
+      return;
+    }
+
+    lineBuffer[lineLength++] = incoming;
+    lineBuffer[lineLength] = '\0';
+    lineCursor = lineLength;
+    Serial.print(incoming);
+    return;
+  }
+
+  if (escapeState == 1) {
+    if (incoming == '[') {
+      escapeState = 2;
+      escapeBufferLength = 0;
+      escapeBuffer[0] = '\0';
+      return;
+    }
+    escapeState = 0;
+    return;
+  }
+
+  if (escapeState == 2) {
+    if ((incoming >= '0' && incoming <= '9') || incoming == ';') {
+      if (escapeBufferLength < (sizeof(escapeBuffer) - 1)) {
+        escapeBuffer[escapeBufferLength++] = incoming;
+        escapeBuffer[escapeBufferLength] = '\0';
+      }
+      return;
+    }
+    processEscapeSequence(incoming);
+    escapeState = 0;
+    renderEditLine();
+    return;
+  }
+
+  if (incoming == '\033') {
+    escapeState = 1;
+    return;
+  }
+  if (incoming == '\r' || incoming == '\n') {
+    submitCurrentLine();
+    ignoreNextLf = incoming == '\r';
+    return;
+  }
+  if (incoming == 0x08 || incoming == 0x7F) {
+    backspaceAtCursor();
+    renderEditLine();
+    return;
+  }
+  if (incoming < 0x20 || incoming > 0x7E) {
+    return;
+  }
+
+  insertAtCursor(incoming);
+  renderEditLine();
+}
 
 bool equalsIgnoreCase(const char *left, const char *right) {
   if (left == nullptr || right == nullptr) {
@@ -410,6 +731,80 @@ bool parseControllerIndex(const char *text, size_t &index) {
   return true;
 }
 
+bool resolveControllerSelector(const char *selector,
+                              size_t &index,
+                              bool &ambiguous,
+                              const char **ambiguousName) {
+  index = static_cast<size_t>(-1);
+  ambiguous = false;
+  if (ambiguousName != nullptr) {
+    *ambiguousName = nullptr;
+  }
+
+  size_t parsedIndex = static_cast<size_t>(-1);
+  if (parseControllerIndex(selector, parsedIndex)) {
+    if (parsedIndex >= controllerCount) {
+      return false;
+    }
+    index = parsedIndex;
+    return true;
+  }
+
+  uint32_t parsedId = 0;
+  if (parseControllerId(selector, parsedId)) {
+    for (size_t i = 0; i < controllerCount; ++i) {
+      if (controllers[i].id == parsedId) {
+        index = i;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  size_t exactMatch = static_cast<size_t>(-1);
+  size_t exactCount = 0;
+  size_t prefixMatch = static_cast<size_t>(-1);
+  size_t prefixCount = 0;
+
+  for (size_t i = 0; i < controllerCount; ++i) {
+    if (equalsIgnoreCase(controllers[i].name, selector)) {
+      exactMatch = i;
+      ++exactCount;
+      continue;
+    }
+    if (startsWithIgnoreCase(controllers[i].name, selector)) {
+      prefixMatch = i;
+      ++prefixCount;
+    }
+  }
+
+  if (exactCount == 1) {
+    index = exactMatch;
+    return true;
+  }
+  if (exactCount > 1) {
+    ambiguous = true;
+    if (ambiguousName != nullptr) {
+      *ambiguousName = selector;
+    }
+    return false;
+  }
+
+  if (prefixCount == 1) {
+    index = prefixMatch;
+    return true;
+  }
+  if (prefixCount > 1) {
+    ambiguous = true;
+    if (ambiguousName != nullptr) {
+      *ambiguousName = selector;
+    }
+    return false;
+  }
+
+  return false;
+}
+
 void setDefaultControllerName(ControllerEntry &controller) {
   snprintf(controller.name, sizeof(controller.name), "0x%05lX", static_cast<unsigned long>(controller.id));
 }
@@ -446,7 +841,7 @@ DecodedFrame decodeFrame(uint32_t frame) {
   decoded.y = static_cast<uint8_t>(frame & 0x0F);
   decoded.key = keyFromId(decoded.id);
   decoded.page = static_cast<uint8_t>((decoded.x >> 3) & 0x01);
-  decoded.manualFunction = static_cast<uint8_t>((decoded.page << 4) | decoded.command);
+  decoded.remoteFunction = static_cast<uint8_t>((decoded.page << 4) | decoded.command);
   decoded.checksumOk = static_cast<uint8_t>(decoded.x ^ decoded.command ^ decoded.key) == decoded.y;
   return decoded;
 }
@@ -461,7 +856,7 @@ bool isPairingFrame(const DecodedFrame &decoded, ControllerProfile &profile) {
     return true;
   }
 
-  if (decoded.command == static_cast<uint8_t>(kManualFan & 0x0F) && decoded.page == 0) {
+  if (decoded.command == static_cast<uint8_t>(kRemoteFan & 0x0F) && decoded.page == 0) {
     profile = ControllerProfile::Remote;
     return true;
   }
@@ -587,7 +982,6 @@ void saveControllers() {
     stored[index].id = controllers[index].id;
     stored[index].profile = static_cast<uint8_t>(controllers[index].profile);
     stored[index].data = controllers[index].data;
-    memcpy(stored[index].name, controllers[index].name, sizeof(stored[index].name));
   }
   preferences.putBytes(kPrefsDataKey, stored, controllerCount * sizeof(StoredControllerEntry));
 }
@@ -632,45 +1026,6 @@ void loadControllers() {
       controllers[controllerCount].id = stored[index].id;
       controllers[controllerCount].profile = static_cast<ControllerProfile>(stored[index].profile);
       controllers[controllerCount].data = stored[index].data;
-      memcpy(controllers[controllerCount].name, stored[index].name, sizeof(controllers[controllerCount].name));
-      controllers[controllerCount].name[kMaxControllerNameLength] = '\0';
-      if (controllers[controllerCount].name[0] == '\0') {
-        setDefaultControllerName(controllers[controllerCount]);
-      }
-      if (controllers[controllerCount].data.txProtocol == 0) {
-        controllers[controllerCount].data.txProtocol = kDefaultTxProtocol;
-      }
-      if (controllers[controllerCount].data.txDelayUs == 0) {
-        controllers[controllerCount].data.txDelayUs = kDefaultTxDelayUs;
-      }
-      ++controllerCount;
-    }
-    return;
-  }
-
-  if (storedBytes == (storedCount * sizeof(StoredControllerEntryV2))) {
-    StoredControllerEntryV2 stored[kMaxControllerCount] = {};
-    const size_t maxBytes = sizeof(stored);
-    const size_t requestedBytes = storedBytes < maxBytes ? storedBytes : maxBytes;
-    const size_t readBytes = preferences.getBytes(kPrefsDataKey, stored, requestedBytes);
-    size_t readCount = readBytes / sizeof(StoredControllerEntryV2);
-    if (readCount > storedCount) {
-      readCount = storedCount;
-    }
-
-    for (size_t index = 0; index < readCount && controllerCount < kMaxControllerCount; ++index) {
-      if (stored[index].id == 0) {
-        continue;
-      }
-      if (stored[index].profile != static_cast<uint8_t>(ControllerProfile::Wall) &&
-          stored[index].profile != static_cast<uint8_t>(ControllerProfile::Remote) &&
-          stored[index].profile != static_cast<uint8_t>(ControllerProfile::Qiachip)) {
-        continue;
-      }
-
-      controllers[controllerCount].id = stored[index].id;
-      controllers[controllerCount].profile = static_cast<ControllerProfile>(stored[index].profile);
-      controllers[controllerCount].data = stored[index].data;
       setDefaultControllerName(controllers[controllerCount]);
       if (controllers[controllerCount].data.txProtocol == 0) {
         controllers[controllerCount].data.txProtocol = kDefaultTxProtocol;
@@ -678,42 +1033,6 @@ void loadControllers() {
       if (controllers[controllerCount].data.txDelayUs == 0) {
         controllers[controllerCount].data.txDelayUs = kDefaultTxDelayUs;
       }
-      ++controllerCount;
-    }
-    return;
-  }
-
-  if (storedBytes == (storedCount * sizeof(StoredControllerEntryV1))) {
-    StoredControllerEntryV1 stored[kMaxControllerCount] = {};
-    const size_t maxBytes = sizeof(stored);
-    const size_t requestedBytes = storedBytes < maxBytes ? storedBytes : maxBytes;
-    const size_t readBytes = preferences.getBytes(kPrefsDataKey, stored, requestedBytes);
-    size_t readCount = readBytes / sizeof(StoredControllerEntryV1);
-    if (readCount > storedCount) {
-      readCount = storedCount;
-    }
-
-    for (size_t index = 0; index < readCount && controllerCount < kMaxControllerCount; ++index) {
-      if (stored[index].id == 0) {
-        continue;
-      }
-      if (stored[index].profile != static_cast<uint8_t>(ControllerProfile::Wall) &&
-          stored[index].profile != static_cast<uint8_t>(ControllerProfile::Remote) &&
-          stored[index].profile != static_cast<uint8_t>(ControllerProfile::Qiachip)) {
-        continue;
-      }
-
-      controllers[controllerCount].id = stored[index].id;
-      controllers[controllerCount].profile = static_cast<ControllerProfile>(stored[index].profile);
-      controllers[controllerCount].data = {};
-      controllers[controllerCount].data.wall.counter = stored[index].data.wall.counter;
-      controllers[controllerCount].data.wall.timerIndex = stored[index].data.wall.timerIndex;
-      controllers[controllerCount].data.wall.reverseUsesB = stored[index].data.wall.reverseUsesB;
-      controllers[controllerCount].data.manual.counter = stored[index].data.manual.counter;
-      controllers[controllerCount].data.manual.timerIndex = stored[index].data.manual.timerIndex;
-      controllers[controllerCount].data.txProtocol = kDefaultTxProtocol;
-      controllers[controllerCount].data.txDelayUs = kDefaultTxDelayUs;
-      setDefaultControllerName(controllers[controllerCount]);
       ++controllerCount;
     }
   }
@@ -774,9 +1093,9 @@ bool sendWallAction(ControllerEntry &controller, uint8_t command, const char *la
   return true;
 }
 
-bool sendManualAction(ControllerEntry &controller, uint8_t functionId, const char *label, bool incrementCounter) {
+bool sendRemoteAction(ControllerEntry &controller, uint8_t functionId, const char *label, bool incrementCounter) {
   const uint8_t page = static_cast<uint8_t>((functionId >> 4) & 0x01);
-  const uint8_t counter = controller.data.manual.counter;
+  const uint8_t counter = controller.data.remote.counter;
   const uint8_t command = static_cast<uint8_t>(functionId & 0x0F);
   const uint8_t x = static_cast<uint8_t>((page << 3) | (counter & 0x07));
   const uint32_t frame = ((controller.id & 0xFFFFFUL) << 12) |
@@ -793,7 +1112,7 @@ bool sendManualAction(ControllerEntry &controller, uint8_t functionId, const cha
                 counter,
                 static_cast<unsigned long>(frame));
   if (incrementCounter) {
-    controller.data.manual.counter = static_cast<uint8_t>((controller.data.manual.counter + 1) & 0x07);
+    controller.data.remote.counter = static_cast<uint8_t>((controller.data.remote.counter + 1) & 0x07);
     saveControllers();
   }
   return true;
@@ -805,9 +1124,9 @@ bool sendPairBurst(ControllerEntry &controller, unsigned long durationMs) {
     if (controller.profile == ControllerProfile::Wall) {
       sendWallAction(controller, kWallBeep, "Pair", false);
     } else if (controller.profile == ControllerProfile::Qiachip) {
-      sendManualAction(controller, kQiachipPair, "Pair", false);
+      sendRemoteAction(controller, kQiachipPair, "Pair", false);
     } else {
-      sendManualAction(controller, kManualFan, "Pair", false);
+      sendRemoteAction(controller, kRemoteFan, "Pair", false);
     }
     delay(kPairRepeatMs);
   }
@@ -816,21 +1135,21 @@ bool sendPairBurst(ControllerEntry &controller, unsigned long durationMs) {
 }
 
 bool sendQiachipLight(ControllerEntry &controller) {
-  return sendManualAction(controller, kQiachipLight, "Light", true);
+  return sendRemoteAction(controller, kQiachipLight, "Light", true);
 }
 
 bool sendQiachipStop(ControllerEntry &controller) {
-  return sendManualAction(controller, kQiachipStop, "Stop", true);
+  return sendRemoteAction(controller, kQiachipStop, "Stop", true);
 }
 
 bool sendQiachipSpeed(ControllerEntry &controller, uint8_t speed) {
   switch (speed) {
     case 1:
-      return sendManualAction(controller, kQiachipSpeed1, "Speed1", true);
+      return sendRemoteAction(controller, kQiachipSpeed1, "Speed1", true);
     case 2:
-      return sendManualAction(controller, kQiachipSpeed2, "Speed2", true);
+      return sendRemoteAction(controller, kQiachipSpeed2, "Speed2", true);
     case 3:
-      return sendManualAction(controller, kQiachipSpeed3, "Speed3", true);
+      return sendRemoteAction(controller, kQiachipSpeed3, "Speed3", true);
     default:
       Serial.println("Qiachip supports Speed 1, 2 or 3 only.");
       return false;
@@ -845,13 +1164,13 @@ bool sendQiachipTimer(ControllerEntry &controller, bool hasValue, uint8_t value)
 
   switch (value) {
     case 1:
-      return sendManualAction(controller, kQiachipTimer1, "Timer1", true);
+      return sendRemoteAction(controller, kQiachipTimer1, "Timer1", true);
     case 2:
-      return sendManualAction(controller, kQiachipTimer2, "Timer2", true);
+      return sendRemoteAction(controller, kQiachipTimer2, "Timer2", true);
     case 4:
-      return sendManualAction(controller, kQiachipTimer4, "Timer4", true);
+      return sendRemoteAction(controller, kQiachipTimer4, "Timer4", true);
     case 8:
-      return sendManualAction(controller, kQiachipTimer8, "Timer8", true);
+      return sendRemoteAction(controller, kQiachipTimer8, "Timer8", true);
     default:
       Serial.println("Qiachip supports Timer 1, 2, 4 or 8 only.");
       return false;
@@ -861,19 +1180,19 @@ bool sendQiachipTimer(ControllerEntry &controller, bool hasValue, uint8_t value)
 bool sendLight(ControllerEntry &controller) {
   return controller.profile == ControllerProfile::Wall
            ? sendWallAction(controller, kWallLight, "Light", true)
-           : sendManualAction(controller, kManualLight, "Light", true);
+           : sendRemoteAction(controller, kRemoteLight, "Light", true);
 }
 
 bool sendFan(ControllerEntry &controller) {
   return controller.profile == ControllerProfile::Wall
            ? sendWallAction(controller, kWallFan, "Fan", true)
-           : sendManualAction(controller, kManualFan, "Fan", true);
+           : sendRemoteAction(controller, kRemoteFan, "Fan", true);
 }
 
 bool sendBeep(ControllerEntry &controller) {
   return controller.profile == ControllerProfile::Wall
            ? sendWallAction(controller, kWallBeep, "Beep", true)
-           : sendManualAction(controller, kManualBeep, "Beep", true);
+           : sendRemoteAction(controller, kRemoteBeep, "Beep", true);
 }
 
 bool sendReverse(ControllerEntry &controller) {
@@ -886,7 +1205,7 @@ bool sendReverse(ControllerEntry &controller) {
     }
     return ok;
   }
-  return sendManualAction(controller, kManualReverse, "Reverse", true);
+  return sendRemoteAction(controller, kRemoteReverse, "Reverse", true);
 }
 
 bool sendTemp(ControllerEntry &controller) {
@@ -894,23 +1213,23 @@ bool sendTemp(ControllerEntry &controller) {
     Serial.println("Temp is not valid for profile wall.");
     return false;
   }
-  return sendManualAction(controller, kManualTemp, "Temp", true);
+  return sendRemoteAction(controller, kRemoteTemp, "Temp", true);
 }
 
 bool sendSpeed(ControllerEntry &controller, uint8_t speed) {
   switch (speed) {
     case 1:
-      return controller.profile == ControllerProfile::Wall ? sendWallAction(controller, kWallSpeed1, "Speed1", true) : sendManualAction(controller, kManualSpeed1, "Speed1", true);
+      return controller.profile == ControllerProfile::Wall ? sendWallAction(controller, kWallSpeed1, "Speed1", true) : sendRemoteAction(controller, kRemoteSpeed1, "Speed1", true);
     case 2:
-      return controller.profile == ControllerProfile::Wall ? sendWallAction(controller, kWallSpeed2, "Speed2", true) : sendManualAction(controller, kManualSpeed2, "Speed2", true);
+      return controller.profile == ControllerProfile::Wall ? sendWallAction(controller, kWallSpeed2, "Speed2", true) : sendRemoteAction(controller, kRemoteSpeed2, "Speed2", true);
     case 3:
-      return controller.profile == ControllerProfile::Wall ? sendWallAction(controller, kWallSpeed3, "Speed3", true) : sendManualAction(controller, kManualSpeed3, "Speed3", true);
+      return controller.profile == ControllerProfile::Wall ? sendWallAction(controller, kWallSpeed3, "Speed3", true) : sendRemoteAction(controller, kRemoteSpeed3, "Speed3", true);
     case 4:
-      return controller.profile == ControllerProfile::Wall ? sendWallAction(controller, kWallSpeed4, "Speed4", true) : sendManualAction(controller, kManualSpeed4, "Speed4", true);
+      return controller.profile == ControllerProfile::Wall ? sendWallAction(controller, kWallSpeed4, "Speed4", true) : sendRemoteAction(controller, kRemoteSpeed4, "Speed4", true);
     case 5:
-      return controller.profile == ControllerProfile::Wall ? sendWallAction(controller, kWallSpeed5, "Speed5", true) : sendManualAction(controller, kManualSpeed5, "Speed5", true);
+      return controller.profile == ControllerProfile::Wall ? sendWallAction(controller, kWallSpeed5, "Speed5", true) : sendRemoteAction(controller, kRemoteSpeed5, "Speed5", true);
     case 6:
-      return controller.profile == ControllerProfile::Wall ? sendWallAction(controller, kWallSpeed6, "Speed6", true) : sendManualAction(controller, kManualSpeed6, "Speed6", true);
+      return controller.profile == ControllerProfile::Wall ? sendWallAction(controller, kWallSpeed6, "Speed6", true) : sendRemoteAction(controller, kRemoteSpeed6, "Speed6", true);
     default:
       Serial.println("Speed must be between 1 and 6.");
       return false;
@@ -925,14 +1244,14 @@ bool sendTimer(ControllerEntry &controller, bool hasValue, uint8_t value) {
     }
     switch (value) {
       case 1:
-        controller.data.manual.timerIndex = 0;
-        return sendManualAction(controller, kManualTimer1h, "Timer1h", true);
+        controller.data.remote.timerIndex = 0;
+        return sendRemoteAction(controller, kRemoteTimer1h, "Timer1h", true);
       case 2:
-        controller.data.manual.timerIndex = 1;
-        return sendManualAction(controller, kManualTimer2h, "Timer2h", true);
+        controller.data.remote.timerIndex = 1;
+        return sendRemoteAction(controller, kRemoteTimer2h, "Timer2h", true);
       case 4:
-        controller.data.manual.timerIndex = 2;
-        return sendManualAction(controller, kManualTimer4h, "Timer4h", true);
+        controller.data.remote.timerIndex = 2;
+        return sendRemoteAction(controller, kRemoteTimer4h, "Timer4h", true);
       default:
         Serial.println("Remote profile supports Timer 1, 2 or 4 only.");
         return false;
@@ -969,6 +1288,17 @@ bool sendTimer(ControllerEntry &controller, bool hasValue, uint8_t value) {
       Serial.println("Wall profile supports Timer 0, 1, 2, 4 or 8 only.");
       return false;
   }
+}
+
+bool sendCustom(ControllerEntry &controller, uint8_t value) {
+  bool ok = false;
+  if (controller.profile == ControllerProfile::Wall) {
+    ok = sendWallAction(controller, value, "Custom", true);
+  } else {
+    ok = sendRemoteAction(controller, value, "Custom", true);
+  }
+
+  return ok;
 }
 
 bool isPairingCandidate(const DecodedFrame &decoded, ControllerProfile &profile) {
@@ -1076,8 +1406,8 @@ void printControllerData(const ControllerEntry &controller) {
   }
 
   Serial.printf("data[remote counter=%u timer=%u key=0x%X rfProto=%u rfDelay=%uus]\n",
-                controller.data.manual.counter,
-                controller.data.manual.timerIndex,
+                controller.data.remote.counter,
+                controller.data.remote.timerIndex,
                 key,
                 txProtocolFor(controller),
                 txDelayUsFor(controller));
@@ -1086,11 +1416,17 @@ void printControllerData(const ControllerEntry &controller) {
 void printHelp() {
   Serial.println("Commands:");
   if (appMode == AppMode::Receiver) {
+    Serial.println("  Serial | VT100");
     Serial.println("  Pair [<time> | <ID> <profile> [<protocol> <delay>]]");
-    Serial.println("  Use <ID|index>");
+    Serial.println("  Sniffer");
+    Serial.println("  Use <idx|ID|name>");
     Serial.println("  List | ls");
-    Serial.println("  Remove <ID|index> | rm <ID|index>");
+    Serial.println("  Remove <idx|ID> | rm <idx|ID>");
     Serial.println("  Clear [-f]");
+    Serial.println("  <idx|ID|name> <controller-command...>");
+  } else if (appMode == AppMode::Sniffer) {
+    Serial.println("  Verbose [<on|off>]");
+    Serial.println("  Exit|Quit");
   } else {
     const ControllerEntry *controller = currentController();
     const bool isControllerProfile = controller != nullptr && controller->profile == ControllerProfile::Remote;
@@ -1120,8 +1456,8 @@ void printHelp() {
     Serial.println("  Name [<newName>] (max 16)");
     Serial.println("  Rf [<protocol> <delay> | protocol <n> | delay <us>]");
     Serial.println("  Pair [<time>]");
-    Serial.println("  Exit");
     Serial.println("  Status");
+    Serial.println("  Exit|Quit");
   }
   Serial.println("  Help | ?");
 }
@@ -1141,14 +1477,9 @@ void printStatus() {
 }
 
 void printPrompt() {
-  if (appMode == AppMode::Controller) {
-    const ControllerEntry *controller = currentController();
-    if (controller != nullptr) {
-      Serial.printf("0x%05lX> ", static_cast<unsigned long>(controller->id));
-      return;
-    }
-  }
-  Serial.print("> ");
+  char prompt[24] = {};
+  buildPrompt(prompt, sizeof(prompt));
+  Serial.print(prompt);
 }
 
 void addAmbiguousCommand(const char *commandName,
@@ -1183,24 +1514,29 @@ CommandId resolveCommand(const char *token, const char **ambiguousCommands, size
   }
 
   static const CommandSpec specs[] = {
-      {CommandId::Help, {"help", "?"}, 2, true, true},
-      {CommandId::Status, {"status"}, 1, false, true},
-      {CommandId::Remove, {"remove", "rm"}, 2, true, false},
-      {CommandId::List, {"list", "ls"}, 2, true, false},
-      {CommandId::Clear, {"clear"}, 1, true, false},
-      {CommandId::Use, {"use"}, 1, true, false},
-      {CommandId::Exit, {"exit"}, 1, false, true},
-      {CommandId::Light, {"light"}, 1, false, true},
-      {CommandId::Temp, {"temp", "tmp"}, 2, false, true},
-      {CommandId::Speed, {"speed"}, 1, false, true},
-      {CommandId::Fan, {"fan"}, 1, false, true},
-      {CommandId::Stop, {"stop"}, 1, false, true},
-      {CommandId::Timer, {"timer", "tmr"}, 2, false, true},
-      {CommandId::Reverse, {"reverse"}, 1, false, true},
-      {CommandId::Beep, {"beep"}, 1, false, true},
-        {CommandId::Name, {"name", "rename"}, 2, false, true},
-      {CommandId::Radio, {"radio", "rf"}, 2, false, true},
-      {CommandId::Pair, {"pair"}, 1, true, true},
+      {CommandId::Help, {"help", "?"}, 2, true, true, true},
+      {CommandId::Vt100, {"vt100", "vt"}, 2, true, false, false},
+      {CommandId::SerialMode, {"serial"}, 1, true, false, false},
+      {CommandId::Status, {"status"}, 1, false, true, false},
+      {CommandId::Remove, {"remove", "rm"}, 2, true, false, false},
+      {CommandId::List, {"list", "ls"}, 2, true, false, false},
+      {CommandId::Clear, {"clear"}, 1, true, false, false},
+      {CommandId::Use, {"use"}, 1, true, false, false},
+      {CommandId::Exit, {"exit", "quit"}, 2, false, true, true},
+      {CommandId::Light, {"light"}, 1, false, true, false},
+      {CommandId::Temp, {"temp", "tmp"}, 2, false, true, false},
+      {CommandId::Speed, {"speed"}, 1, false, true, false},
+      {CommandId::Fan, {"fan"}, 1, false, true, false},
+      {CommandId::Stop, {"stop"}, 1, false, true, false},
+      {CommandId::Timer, {"timer", "tmr"}, 2, false, true, false},
+      {CommandId::Reverse, {"reverse"}, 1, false, true, false},
+      {CommandId::Beep, {"beep"}, 1, false, true, false},
+      {CommandId::Name, {"name", "rename"}, 2, false, true, false},
+      {CommandId::Radio, {"radio", "rf"}, 2, false, true, false},
+      {CommandId::Sniffer, {"sniffer", "sniff"}, 2, true, false, false},
+      {CommandId::Verbose, {"verbose"}, 1, false, false, true},
+      {CommandId::Pair, {"pair"}, 1, true, true, false},
+      {CommandId::Custom, {"custom"}, 1, false, true, false},
   };
 
   const ControllerEntry *controller = appMode == AppMode::Controller ? currentController() : nullptr;
@@ -1208,7 +1544,9 @@ CommandId resolveCommand(const char *token, const char **ambiguousCommands, size
 
   CommandId match = CommandId::Unknown;
   for (const CommandSpec &spec : specs) {
-    const bool allowed = appMode == AppMode::Receiver ? spec.receiverAllowed : spec.controllerAllowed;
+    const bool allowed = appMode == AppMode::Receiver
+                           ? spec.receiverAllowed
+                           : (appMode == AppMode::Controller ? spec.controllerAllowed : spec.snifferAllowed);
     if (!allowed) {
       continue;
     }
@@ -1261,6 +1599,12 @@ void enterReceiverMode() {
 void enterControllerMode(size_t index) {
   currentControllerIndex = static_cast<int>(index);
   appMode = AppMode::Controller;
+}
+
+void enterSnifferMode() {
+  appMode = AppMode::Sniffer;
+  snifferVerbose = false;
+  currentControllerIndex = -1;
 }
 
 bool handleReceiverPair(char **tokens, size_t tokenCount) {
@@ -1318,6 +1662,15 @@ bool handleReceiverCommand(CommandId command, char **tokens, size_t tokenCount) 
     case CommandId::Help:
       printHelp();
       return true;
+    case CommandId::Vt100:
+      setVt100Mode(true);
+      return true;
+    case CommandId::SerialMode:
+      setVt100Mode(false);
+      return true;
+    case CommandId::Sniffer:
+      enterSnifferMode();
+      return true;
     case CommandId::Pair:
       return handleReceiverPair(tokens, tokenCount);
     case CommandId::Remove: {
@@ -1358,27 +1711,22 @@ bool handleReceiverCommand(CommandId command, char **tokens, size_t tokenCount) 
       return true;
     case CommandId::Use: {
       if (tokenCount < 2) {
-        Serial.println("Use: usage Use <ID|index>");
+        Serial.println("Use: usage Use <selector> (selector=idx|ID|name)");
         return false;
       }
+
       size_t index = static_cast<size_t>(-1);
-      uint32_t id = 0;
-      if (parseControllerIndex(tokens[1], index)) {
-        if (index >= controllerCount) {
-          Serial.printf("Use: unknown index %u.\n", static_cast<unsigned int>(index));
-          return false;
+      bool ambiguous = false;
+      const char *ambiguousName = nullptr;
+      if (!resolveControllerSelector(tokens[1], index, ambiguous, &ambiguousName)) {
+        if (ambiguous) {
+          Serial.printf("Use: ambiguous selector %s.\n", ambiguousName == nullptr ? tokens[1] : ambiguousName);
+        } else {
+          Serial.printf("Use: unknown selector %s.\n", tokens[1]);
         }
-      } else {
-        if (!parseControllerId(tokens[1], id)) {
-          Serial.println("Use: invalid selector (expected ID or index).");
-          return false;
-        }
-        index = findControllerIndex(id);
-        if (index == static_cast<size_t>(-1)) {
-          Serial.printf("Use: unknown ID 0x%05lX.\n", static_cast<unsigned long>(id));
-          return false;
-        }
+        return false;
       }
+
       enterControllerMode(index);
       printPrompt();
       return true;
@@ -1391,6 +1739,47 @@ bool handleReceiverCommand(CommandId command, char **tokens, size_t tokenCount) 
       return false;
     default:
       Serial.println("Command not available in receiver mode.");
+      return false;
+  }
+}
+
+bool handleSnifferCommand(CommandId command, char **tokens, size_t tokenCount) {
+  switch (command) {
+    case CommandId::Help:
+      printHelp();
+      return true;
+    case CommandId::Verbose:
+      if (tokenCount == 1) {
+        snifferVerbose = !snifferVerbose;
+        Serial.printf("Verbose: %s\n", snifferVerbose ? "on" : "off");
+        return true;
+      }
+      if (tokenCount == 2) {
+        if (equalsIgnoreCase(tokens[1], "on")) {
+          snifferVerbose = true;
+          Serial.println("Verbose: on");
+          return true;
+        }
+        if (equalsIgnoreCase(tokens[1], "off")) {
+          snifferVerbose = false;
+          Serial.println("Verbose: off");
+          return true;
+        }
+      }
+      Serial.println("Verbose: usage Verbose [<on|off>]");
+      return false;
+    case CommandId::Exit:
+      enterReceiverMode();
+      printPrompt();
+      return true;
+    case CommandId::Unknown:
+      Serial.println("Unknown command.");
+      return false;
+    case CommandId::Ambiguous:
+      Serial.println("Ambiguous command.");
+      return false;
+    default:
+      Serial.println("Command not available in sniffer mode.");
       return false;
   }
 }
@@ -1575,6 +1964,19 @@ bool handleControllerCommand(CommandId command, char **tokens, size_t tokenCount
       }
       return sendTimer(*controller, true, static_cast<uint8_t>(value));
     }
+    case CommandId::Custom:
+    {
+      if (tokenCount < 2) {
+        Serial.println("Custom: usage Custom <hex-data>");
+        return false;
+      }
+      unsigned long value = 0;
+      if (!parseUnsigned(tokens[1], value) || value > 0x1F) {
+        Serial.println("Custom: invalid value. Must be in range 0..0x1F.");
+        return false;
+      }
+      return sendCustom(*controller, value);  
+    }
     case CommandId::Unknown:
       Serial.println("Unknown command.");
       return false;
@@ -1592,30 +1994,30 @@ void printReceivedFrame(const DecodedFrame &decoded,
                         unsigned int receivedDelay,
                         unsigned int receivedProtocol) {
   if (!decoded.checksumOk) {
-    Serial.printf("RX 0x%08lX bits=%u delay=%u proto=%u -> checksum invalid name=Invalid\n",
+    Serial.printf("RX 0x%08lX bits=%u proto=%u delay=%u -> checksum invalid name=Invalid\n",
                   static_cast<unsigned long>(decoded.raw),
                   receivedBitLength,
-                  receivedDelay,
-                  receivedProtocol);
+                  receivedProtocol,
+                  receivedDelay);
     return;
   }
 
   ControllerProfile profile;
   if (!lookupControllerProfile(decoded.id, profile)) {
-    Serial.printf("RX 0x%08lX bits=%u delay=%u proto=%u Unknown name=Unknown\n",
+    Serial.printf("RX 0x%08lX bits=%u proto=%u delay=%u Unknown name=Unknown\n",
                   static_cast<unsigned long>(decoded.raw),
                   receivedBitLength,
-                  receivedDelay,
-                  receivedProtocol);
+                  receivedProtocol,
+                  receivedDelay);
     return;
   }
 
   if (profile == ControllerProfile::Wall) {
-    Serial.printf("RX 0x%08lX bits=%u delay=%u proto=%u wall cmd=0x%X cnt=0x%X name=%s\n",
+    Serial.printf("RX 0x%08lX bits=%u proto=%u delay=%u wall cmd=0x%X cnt=0x%X name=%s\n",
                   static_cast<unsigned long>(decoded.raw),
                   receivedBitLength,
-                  receivedDelay,
                   receivedProtocol,
+                  receivedDelay,
                   decoded.command,
                   decoded.x,
                   kWallBeep == decoded.command      ? "Beep"
@@ -1633,11 +2035,11 @@ void printReceivedFrame(const DecodedFrame &decoded,
   }
 
   if (profile == ControllerProfile::Qiachip) {
-    Serial.printf("RX 0x%08lX bits=%u delay=%u proto=%u qiachip cmd=0x%X cnt=%u name=%s\n",
+    Serial.printf("RX 0x%08lX bits=%u proto=%u delay=%u qiachip cmd=0x%X cnt=%u name=%s\n",
                   static_cast<unsigned long>(decoded.raw),
                   receivedBitLength,
-                  receivedDelay,
                   receivedProtocol,
+                  receivedDelay,
                   decoded.command,
                   static_cast<unsigned int>(decoded.x & 0x07),
                   decoded.command == kQiachipLight  ? "Light"
@@ -1654,28 +2056,90 @@ void printReceivedFrame(const DecodedFrame &decoded,
     return;
   }
 
-  Serial.printf("RX 0x%08lX bits=%u delay=%u proto=%u remote fn=0x%02X cnt=%u name=%s\n",
+  Serial.printf("RX 0x%08lX bits=%u proto=%u delay=%u remote fn=0x%02X cnt=%u name=%s\n",
                 static_cast<unsigned long>(decoded.raw),
                 receivedBitLength,
-                receivedDelay,
                 receivedProtocol,
-                decoded.manualFunction,
+                receivedDelay,
+                decoded.remoteFunction,
                 static_cast<unsigned int>(decoded.x & 0x07),
-                kManualSpeed1 == decoded.manualFunction  ? "Speed1"
-                : kManualSpeed2 == decoded.manualFunction ? "Speed2"
-                : kManualSpeed3 == decoded.manualFunction ? "Speed3"
-                : kManualSpeed4 == decoded.manualFunction ? "Speed4"
-                : kManualSpeed5 == decoded.manualFunction ? "Speed5"
-                : kManualSpeed6 == decoded.manualFunction ? "Speed6"
-                : kManualLight == decoded.manualFunction  ? "Light"
-                : kManualFan == decoded.manualFunction    ? "Fan"
-                : kManualBeep == decoded.manualFunction   ? "Beep"
-                : kManualTemp == decoded.manualFunction   ? "Temp"
-                : kManualReverse == decoded.manualFunction ? "Reverse"
-                : kManualTimer1h == decoded.manualFunction ? "Timer1h"
-                : kManualTimer2h == decoded.manualFunction ? "Timer2h"
-                : kManualTimer4h == decoded.manualFunction ? "Timer4h"
+                kRemoteSpeed1 == decoded.remoteFunction  ? "Speed1"
+                : kRemoteSpeed2 == decoded.remoteFunction ? "Speed2"
+                : kRemoteSpeed3 == decoded.remoteFunction ? "Speed3"
+                : kRemoteSpeed4 == decoded.remoteFunction ? "Speed4"
+                : kRemoteSpeed5 == decoded.remoteFunction ? "Speed5"
+                : kRemoteSpeed6 == decoded.remoteFunction ? "Speed6"
+                : kRemoteLight == decoded.remoteFunction  ? "Light"
+                : kRemoteFan == decoded.remoteFunction    ? "Fan"
+                : kRemoteBeep == decoded.remoteFunction   ? "Beep"
+                : kRemoteTemp == decoded.remoteFunction   ? "Temp"
+                : kRemoteReverse == decoded.remoteFunction ? "Reverse"
+                : kRemoteTimer1h == decoded.remoteFunction ? "Timer1h"
+                : kRemoteTimer2h == decoded.remoteFunction ? "Timer2h"
+                : kRemoteTimer4h == decoded.remoteFunction ? "Timer4h"
                                                           : "UnknownFn");
+}
+
+void printSnifferFrame(uint32_t frame,
+                       unsigned int receivedBitLength,
+                       unsigned int receivedDelay,
+                       unsigned int receivedProtocol,
+                       const unsigned int *rawTiming) {
+
+  Serial.printf("raw=0x%08lX bits=%u proto=%u delay=%u",
+                static_cast<unsigned long>(frame),
+                receivedBitLength,
+                receivedProtocol,
+                receivedDelay);
+  if (snifferVerbose) {
+    for (int t = 0; t <= receivedBitLength * 2; ++t) {
+      Serial.printf(" %u", rawTiming[t]);
+    }
+  } 
+  Serial.println();
+}
+
+bool handleReceiverIndexedControllerCommand(char **tokens, size_t tokenCount) {
+  if (appMode != AppMode::Receiver || tokenCount < 2) {
+    return false;
+  }
+
+  size_t controllerIndex = static_cast<size_t>(-1);
+  bool ambiguous = false;
+  const char *ambiguousName = nullptr;
+  if (!resolveControllerSelector(tokens[0], controllerIndex, ambiguous, &ambiguousName)) {
+    if (ambiguous) {
+      Serial.printf("Ambiguous controller selector: %s\n", ambiguousName == nullptr ? tokens[0] : ambiguousName);
+      return true;
+    }
+    return false;
+  }
+
+  enterControllerMode(controllerIndex);
+
+  const char *ambiguousCommands[8] = {};
+  size_t ambiguousCount = 0;
+  CommandId subCommand = resolveCommand(tokens[1], ambiguousCommands, 8, &ambiguousCount);
+  if (subCommand == CommandId::Unknown) {
+    enterReceiverMode();
+    Serial.printf("Unknown controller command: %s\n", tokens[1]);
+    return true;
+  }
+  if (subCommand == CommandId::Ambiguous) {
+    enterReceiverMode();
+    printAmbiguousCommand(tokens[1], ambiguousCommands, ambiguousCount);
+    return true;
+  }
+
+  if (subCommand == CommandId::Use || subCommand == CommandId::Exit || subCommand == CommandId::Sniffer) {
+    enterReceiverMode();
+    Serial.println("Command not available in indexed controller context.");
+    return true;
+  }
+
+  const bool ok = handleControllerCommand(subCommand, &tokens[1], tokenCount - 1);
+  enterReceiverMode();
+  return ok;
 }
 
 void handleControllerLine(char *line) {
@@ -1701,6 +2165,14 @@ void handleControllerLine(char *line) {
     return;
   }
 
+  if (appMode == AppMode::Receiver) {
+    const bool indexedHandled = handleReceiverIndexedControllerCommand(tokens, tokenCount);
+    if (indexedHandled) {
+      printPrompt();
+      return;
+    }
+  }
+
   const char *ambiguousCommands[8] = {};
   size_t ambiguousCount = 0;
   CommandId command = resolveCommand(tokens[0], ambiguousCommands, 8, &ambiguousCount);
@@ -1715,8 +2187,10 @@ void handleControllerLine(char *line) {
     return;
   }
 
-  const bool ok = appMode == AppMode::Receiver ? handleReceiverCommand(command, tokens, tokenCount)
-                                               : handleControllerCommand(command, tokens, tokenCount);
+  const bool ok = appMode == AppMode::Receiver
+                    ? handleReceiverCommand(command, tokens, tokenCount)
+                    : (appMode == AppMode::Controller ? handleControllerCommand(command, tokens, tokenCount)
+                                                      : handleSnifferCommand(command, tokens, tokenCount));
   if (ok && command != CommandId::Exit && !(appMode == AppMode::Controller && command == CommandId::Use)) {
     printPrompt();
   }
@@ -1730,7 +2204,9 @@ void handleReceiverTimeout() {
 }
 
 void handleReceiver() {
-  handleReceiverTimeout();
+  if (appMode == AppMode::Receiver) {
+    handleReceiverTimeout();
+  }
 
   if (!radio.available()) {
     return;
@@ -1740,6 +2216,13 @@ void handleReceiver() {
   const unsigned int bitLength = radio.getReceivedBitlength();
   const unsigned int receivedDelay = radio.getReceivedDelay();
   const unsigned int receivedProtocol = radio.getReceivedProtocol();
+  const unsigned int *rawTiming = radio.getReceivedRawdata();
+
+  if (appMode == AppMode::Sniffer) {
+    printSnifferFrame(frame, bitLength, receivedDelay, receivedProtocol, rawTiming);
+    radio.resetAvailable();
+    return;
+  }
   radio.resetAvailable();
 
   if (bitLength != kFrameBitLength || frame == 0) {
@@ -1782,23 +2265,7 @@ void loop() {
   handleReceiver();
 
   while (Serial.available() > 0) {
-    const char incoming = static_cast<char>(Serial.read());
-    if (incoming == '\r') {
-      continue;
-    }
-    if (incoming == '\n') {
-      serialLine[serialLineLength] = '\0';
-      handleControllerLine(serialLine);
-      serialLineLength = 0;
-      continue;
-    }
-    if (serialLineLength >= (kMaxLineLength - 1)) {
-      serialLineLength = 0;
-      Serial.println("Input line too long.");
-      printPrompt();
-      continue;
-    }
-    serialLine[serialLineLength++] = incoming;
+    processSerialInputChar(static_cast<char>(Serial.read()));
   }
 }
 
